@@ -36,7 +36,6 @@ type StripePaymentMethodSpec struct {
 	// owner-referenced child of the PaymentMethod.
 	//
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
 	PaymentMethodRef PaymentMethodLocalRef `json:"paymentMethodRef"`
 }
 

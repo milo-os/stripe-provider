@@ -79,7 +79,7 @@ tasks:
         echo "Code generation complete!"
 
   manifests:
-    desc: Generate RBAC and webhook manifests
+    desc: Generate CRD, RBAC, and webhook manifests
     deps: [install-tools]
     silent: true
     cmds:
@@ -87,8 +87,10 @@ tasks:
         set -e
         echo "Generating manifests..."
         {{.TOOL_DIR}}/controller-gen rbac:roleName=stripe-provider \
+          crd:generateEmbeddedObjectMeta=true \
           webhook \
           paths="./..." \
+          output:crd:artifacts:config=config/base/crd/bases \
           output:rbac:artifacts:config=config/components/controller_rbac \
           output:webhook:artifacts:config=config/base/webhook
         echo "Manifests generated!"
