@@ -159,6 +159,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	event, err := stripewebhook.ConstructEventWithOptions(body, sig, cfg.WebhookSecret, stripewebhook.ConstructEventOptions{
 		Tolerance: signatureTolerance,
+		// Stripe accounts pin an API version in the dashboard; the
+		// SDK's pinned version moves more slowly. Mismatches here are
+		// not actionable — the event still decodes correctly — so we
+		// tolerate them rather than reject otherwise-valid webhooks
+		// after SDK upgrades.
+		IgnoreAPIVersionMismatch: true,
 	})
 	if err != nil {
 		log.Info("rejecting webhook with invalid signature", "err", err.Error())
