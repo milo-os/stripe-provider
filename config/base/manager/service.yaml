@@ -13,7 +13,7 @@ spec:
     control-plane: stripe-provider
   ports:
     - name: webhook
-      port: 8090
+      port: 443
       targetPort: webhook
       protocol: TCP
 ---

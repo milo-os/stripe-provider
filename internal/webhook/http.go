@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package webhook hosts the public Stripe webhook receiver. The receiver
-// resolves a StripeProviderConfig per request, verifies the Stripe
-// signature, dedupes on event id, and applies side effects to
-// StripePaymentMethod / PaymentMethod via the controller-runtime client.
 package webhook
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
@@ -32,169 +26,173 @@ import (
 )
 
 const (
-	// Path is the public route Stripe is configured to deliver events to.
-	Path = "/webhooks/stripe"
-
 	maxBodyBytes       = 1 << 18
 	signatureTolerance = 5 * time.Minute
-	shutdownTimeout    = 10 * time.Second
 )
 
 var log = ctrl.Log.WithName("stripe-webhook")
 
-// ServerOptions configures the standalone HTTP listener that receives
-// Stripe webhooks.
-type ServerOptions struct {
-	// Addr is the listen address (e.g. ":8090").
-	Addr string
+// EventDeduper records and checks Stripe event ids for at-most-once
+// processing semantics.
+type EventDeduper interface {
+	SeenOrRecord(eventID string) bool
+}
 
-	// ProviderConfigName names the StripeProviderConfig used to verify
-	// signatures and look up the secret key for follow-up Stripe API
-	// calls.
+// Webhook is the registered HTTP handler. The Handler field carries the
+// business logic invoked after signature verification + dedupe. In
+// production both are wired up by NewStripeWebhook; tests construct a
+// Webhook directly with a fake client / deduper / handler.
+type Webhook struct {
+	// Client is used to resolve the StripeProviderConfig (for
+	// signature verification + downstream Stripe API calls) and to
+	// patch StripePaymentMethod / PaymentMethod.
+	Client client.Client
+
+	// ProviderConfigName names the StripeProviderConfig this webhook
+	// authenticates against. The webhook resolves the config + its
+	// referenced Secrets per request so secret rotation requires no
+	// restart.
 	ProviderConfigName string
 
-	// TLSCertFile / TLSKeyFile enable in-process TLS termination. In
-	// typical deployments TLS is terminated upstream and these are left
-	// empty.
-	TLSCertFile string
-	TLSKeyFile  string
+	// Dedupe drops repeated event ids. Persistence across restarts is
+	// unnecessary because the downstream patches are idempotent; the
+	// deduper just saves wasted reconciles.
+	Dedupe EventDeduper
+
+	// Handler runs after the request is validated. It returns the HTTP
+	// status to write back to Stripe.
+	Handler Handler
 }
 
-// NewRunnable builds a manager.Runnable that serves the webhook.
-func NewRunnable(opts ServerOptions, mgr manager.Manager) (manager.Runnable, error) {
-	if opts.Addr == "" {
-		return nil, errors.New("stripe webhook server: Addr is required")
+// NewStripeWebhook wires the standard Stripe webhook: signature
+// verification + dedupe + dispatch on setup_intent.* events.
+func NewStripeWebhook(c client.Client, providerConfigName string) *Webhook {
+	wh := &Webhook{
+		Client:             c,
+		ProviderConfigName: providerConfigName,
+		Dedupe:             stripeinternal.NewMemoryDeduper(0),
 	}
-	if opts.ProviderConfigName == "" {
-		return nil, errors.New("stripe webhook server: ProviderConfigName is required")
-	}
-
-	handler := &handler{
-		client:             mgr.GetClient(),
-		providerConfigName: opts.ProviderConfigName,
-		dedupe:             stripeinternal.NewMemoryDeduper(0),
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle(Path, handler)
-
-	srv := &http.Server{
-		Addr:              opts.Addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	if opts.TLSCertFile != "" && opts.TLSKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(opts.TLSCertFile, opts.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("loading TLS cert: %w", err)
-		}
-		srv.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}
-	}
-	return &runnable{srv: srv}, nil
+	wh.Handler = HandlerFunc(func(ctx context.Context, req Request) Response {
+		return wh.dispatch(ctx, req.Event)
+	})
+	return wh
 }
 
-type runnable struct {
-	srv *http.Server
+// SetupWithManager registers the webhook on the manager's shared
+// webhook server. The manager owns TLS termination and lifecycle, so
+// we don't need a separate http.Server here.
+func (wh *Webhook) SetupWithManager(mgr ctrl.Manager) error {
+	mgr.GetWebhookServer().Register(Endpoint, wh)
+	return nil
 }
 
-func (r *runnable) Start(ctx context.Context) error {
-	errCh := make(chan error, 1)
-	go func() {
-		log.Info("starting Stripe webhook server", "addr", r.srv.Addr, "tls", r.srv.TLSConfig != nil)
-		var err error
-		if r.srv.TLSConfig != nil {
-			err = r.srv.ListenAndServeTLS("", "")
-		} else {
-			err = r.srv.ListenAndServe()
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+// ServeHTTP implements http.Handler.
+func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	eventType := "unknown"
+	outcome := OutcomeHandlerError
+	defer func() {
+		stripeWebhookRequestsTotal.WithLabelValues(eventType, outcome).Inc()
+		stripeWebhookRequestDuration.WithLabelValues(eventType, outcome).Observe(time.Since(start).Seconds())
+	}()
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error(nil, "panic in stripe webhook handler", "panic", rec)
+			outcome = OutcomeHandlerError
+			wh.writeResponse(w, InternalServerErrorResponse())
 		}
 	}()
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		_ = r.srv.Shutdown(shutdownCtx)
-		return nil
-	case err := <-errCh:
-		return err
-	}
-}
 
-type handler struct {
-	client             client.Client
-	providerConfigName string
-	dedupe             *stripeinternal.MemoryDeduper
-}
-
-func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", http.MethodPost)
+		outcome = OutcomeMethodNotAllowed
+		wh.writeResponse(w, MethodNotAllowedResponse())
 		return
 	}
+
 	ctx := r.Context()
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		log.Error(err, "reading webhook body")
+		outcome = OutcomeMalformed
+		wh.writeResponse(w, BadRequestResponse())
 		return
 	}
 	sig := r.Header.Get("Stripe-Signature")
 	if sig == "" {
-		http.Error(w, "missing Stripe-Signature", http.StatusBadRequest)
+		outcome = OutcomeMissingSignature
+		wh.writeResponse(w, BadRequestResponse())
 		return
 	}
 
-	cfg, err := stripeinternal.ResolveConfig(ctx, h.client, h.providerConfigName)
+	cfg, err := stripeinternal.ResolveConfig(ctx, wh.Client, wh.ProviderConfigName)
 	if err != nil {
-		log.Error(err, "resolving StripeProviderConfig", "name", h.providerConfigName)
-		// 500 so Stripe retries.
-		http.Error(w, "provider unavailable", http.StatusInternalServerError)
+		log.Error(err, "resolving StripeProviderConfig", "name", wh.ProviderConfigName)
+		outcome = OutcomeProviderConfigErr
+		wh.writeResponse(w, InternalServerErrorResponse())
 		return
 	}
 
 	event, err := stripewebhook.ConstructEventWithOptions(body, sig, cfg.WebhookSecret, stripewebhook.ConstructEventOptions{
 		Tolerance: signatureTolerance,
 		// Stripe accounts pin an API version in the dashboard; the
-		// SDK's pinned version moves more slowly. Mismatches here are
-		// not actionable — the event still decodes correctly — so we
+		// SDK's pinned version moves more slowly. Mismatches here
+		// aren't actionable — the event still decodes — so we
 		// tolerate them rather than reject otherwise-valid webhooks
 		// after SDK upgrades.
 		IgnoreAPIVersionMismatch: true,
 	})
 	if err != nil {
 		log.Info("rejecting webhook with invalid signature", "err", err.Error())
-		http.Error(w, "invalid signature", http.StatusBadRequest)
+		outcome = OutcomeInvalidSignature
+		wh.writeResponse(w, BadRequestResponse())
 		return
 	}
+	eventType = string(event.Type)
 
-	if h.dedupe != nil && h.dedupe.SeenOrRecord(event.ID) {
+	if wh.Dedupe != nil && wh.Dedupe.SeenOrRecord(event.ID) {
 		log.V(1).Info("dropping duplicate event", "id", event.ID, "type", event.Type)
-		w.WriteHeader(http.StatusOK)
+		outcome = OutcomeDuplicate
+		wh.writeResponse(w, OkResponse())
 		return
 	}
 
-	if err := h.dispatch(ctx, cfg, &event); err != nil {
-		log.Error(err, "dispatching event", "id", event.ID, "type", event.Type)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+	resp := wh.Handler.Handle(ctx, Request{Event: &event})
+	switch {
+	case resp.HttpStatus >= 200 && resp.HttpStatus < 300:
+		outcome = OutcomeSuccess
+	case resp.HttpStatus >= 500:
+		outcome = OutcomeHandlerError
+	default:
+		outcome = OutcomeMalformed
 	}
-	w.WriteHeader(http.StatusOK)
+	wh.writeResponse(w, resp)
 }
 
-func (h *handler) dispatch(ctx context.Context, cfg *stripeinternal.ResolvedConfig, event *stripego.Event) error {
+func (wh *Webhook) writeResponse(w http.ResponseWriter, resp Response) {
+	w.WriteHeader(resp.HttpStatus)
+}
+
+// dispatch routes a verified Stripe event to the right handler.
+// Unknown event types are explicitly OK'd so Stripe stops retrying.
+func (wh *Webhook) dispatch(ctx context.Context, event *stripego.Event) Response {
 	switch event.Type {
 	case "setup_intent.succeeded":
-		return h.handleSetupIntentSucceeded(ctx, cfg, event)
+		if err := wh.handleSetupIntentSucceeded(ctx, event); err != nil {
+			log.Error(err, "handling setup_intent.succeeded", "id", event.ID)
+			return InternalServerErrorResponse()
+		}
+		return OkResponse()
 	case "setup_intent.setup_failed", "setup_intent.canceled":
-		return h.handleSetupIntentFailed(ctx, event)
+		if err := wh.handleSetupIntentFailed(ctx, event); err != nil {
+			log.Error(err, "handling setup_intent failure", "id", event.ID, "type", event.Type)
+			return InternalServerErrorResponse()
+		}
+		return OkResponse()
 	default:
 		log.V(1).Info("ignoring unhandled event", "type", event.Type, "id", event.ID)
-		return nil
+		return OkResponse()
 	}
 }
 
@@ -225,47 +223,46 @@ func decodeSetupIntent(event *stripego.Event) (*setupIntentPayload, error) {
 	return &si, nil
 }
 
-func (h *handler) handleSetupIntentSucceeded(ctx context.Context, cfg *stripeinternal.ResolvedConfig, event *stripego.Event) error {
+func (wh *Webhook) handleSetupIntentSucceeded(ctx context.Context, event *stripego.Event) error {
 	si, err := decodeSetupIntent(event)
 	if err != nil {
 		return err
 	}
-	spm, err := h.findStripePaymentMethod(ctx, si)
+	spm, err := wh.findStripePaymentMethod(ctx, si)
 	if err != nil || spm == nil {
 		return err
 	}
 
-	stripe := stripeinternal.NewClient(cfg)
-	pmDetails, err := stripe.RetrievePaymentMethod(ctx, si.PaymentMethod)
+	cfg, err := stripeinternal.ResolveConfig(ctx, wh.Client, wh.ProviderConfigName)
+	if err != nil {
+		return err
+	}
+	pmDetails, err := stripeinternal.NewClient(cfg).RetrievePaymentMethod(ctx, si.PaymentMethod)
 	if err != nil {
 		return fmt.Errorf("retrieving PaymentMethod for SetupIntent %q: %w", si.ID, err)
 	}
-
-	if err := h.patchStripeSuccess(ctx, spm, si, pmDetails); err != nil {
+	if err := wh.patchStripeSuccess(ctx, spm, si, pmDetails); err != nil {
 		return err
 	}
-	return h.projectOntoPaymentMethod(ctx, spm, pmDetails)
+	return wh.projectOntoPaymentMethod(ctx, spm, pmDetails)
 }
 
-func (h *handler) handleSetupIntentFailed(ctx context.Context, event *stripego.Event) error {
+func (wh *Webhook) handleSetupIntentFailed(ctx context.Context, event *stripego.Event) error {
 	si, err := decodeSetupIntent(event)
 	if err != nil {
 		return err
 	}
-	spm, err := h.findStripePaymentMethod(ctx, si)
+	spm, err := wh.findStripePaymentMethod(ctx, si)
 	if err != nil || spm == nil {
 		return err
 	}
-	return h.patchStripeFailure(ctx, spm, si)
+	return wh.patchStripeFailure(ctx, spm, si)
 }
 
-// findStripePaymentMethod locates the StripePaymentMethod that owns the
-// supplied SetupIntent. Prefers the metadata pointer set at creation
-// time; falls back to a list/scan keyed on status.setupIntent.id.
-func (h *handler) findStripePaymentMethod(ctx context.Context, si *setupIntentPayload) (*stripev1alpha1.StripePaymentMethod, error) {
+func (wh *Webhook) findStripePaymentMethod(ctx context.Context, si *setupIntentPayload) (*stripev1alpha1.StripePaymentMethod, error) {
 	if ns, name := si.Metadata["stripe_payment_method_namespace"], si.Metadata["stripe_payment_method_name"]; ns != "" && name != "" {
 		var spm stripev1alpha1.StripePaymentMethod
-		if err := h.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &spm); err != nil {
+		if err := wh.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &spm); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil, nil
 			}
@@ -274,7 +271,7 @@ func (h *handler) findStripePaymentMethod(ctx context.Context, si *setupIntentPa
 		return &spm, nil
 	}
 	var list stripev1alpha1.StripePaymentMethodList
-	if err := h.client.List(ctx, &list); err != nil {
+	if err := wh.Client.List(ctx, &list); err != nil {
 		return nil, fmt.Errorf("listing StripePaymentMethods: %w", err)
 	}
 	for i := range list.Items {
@@ -286,7 +283,7 @@ func (h *handler) findStripePaymentMethod(ctx context.Context, si *setupIntentPa
 	return nil, nil
 }
 
-func (h *handler) patchStripeSuccess(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, si *setupIntentPayload, pm *stripeinternal.PaymentMethodDetails) error {
+func (wh *Webhook) patchStripeSuccess(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, si *setupIntentPayload, pm *stripeinternal.PaymentMethodDetails) error {
 	now := metav1.Now()
 	patch := client.MergeFrom(spm.DeepCopy())
 	spm.Status.Phase = stripev1alpha1.StripePaymentMethodPhaseActive
@@ -313,7 +310,6 @@ func (h *handler) patchStripeSuccess(ctx context.Context, spm *stripev1alpha1.St
 			},
 		}
 	}
-	_ = pm.BillingAddress // recorded on the billing PaymentMethod projection below
 	apimeta.SetStatusCondition(&spm.Status.Conditions, metav1.Condition{
 		Type:               "Confirmed",
 		Status:             metav1.ConditionTrue,
@@ -321,10 +317,10 @@ func (h *handler) patchStripeSuccess(ctx context.Context, spm *stripev1alpha1.St
 		Reason:             "SetupIntentSucceeded",
 		Message:            fmt.Sprintf("Stripe SetupIntent %s succeeded.", si.ID),
 	})
-	return h.client.Status().Patch(ctx, spm, patch)
+	return wh.Client.Status().Patch(ctx, spm, patch)
 }
 
-func (h *handler) patchStripeFailure(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, si *setupIntentPayload) error {
+func (wh *Webhook) patchStripeFailure(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, si *setupIntentPayload) error {
 	patch := client.MergeFrom(spm.DeepCopy())
 	spm.Status.Phase = stripev1alpha1.StripePaymentMethodPhaseFailed
 	if spm.Status.SetupIntent == nil {
@@ -348,13 +344,13 @@ func (h *handler) patchStripeFailure(ctx context.Context, spm *stripev1alpha1.St
 		Reason:             reason,
 		Message:            msg,
 	})
-	return h.client.Status().Patch(ctx, spm, patch)
+	return wh.Client.Status().Patch(ctx, spm, patch)
 }
 
-func (h *handler) projectOntoPaymentMethod(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, pm *stripeinternal.PaymentMethodDetails) error {
+func (wh *Webhook) projectOntoPaymentMethod(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, pm *stripeinternal.PaymentMethodDetails) error {
 	var bm billingv1alpha1.PaymentMethod
 	key := types.NamespacedName{Namespace: spm.Namespace, Name: spm.Spec.PaymentMethodRef.Name}
-	if err := h.client.Get(ctx, key, &bm); err != nil {
+	if err := wh.Client.Get(ctx, key, &bm); err != nil {
 		return fmt.Errorf("getting PaymentMethod %s/%s: %w", key.Namespace, key.Name, err)
 	}
 	patch := client.MergeFrom(bm.DeepCopy())
@@ -392,5 +388,5 @@ func (h *handler) projectOntoPaymentMethod(ctx context.Context, spm *stripev1alp
 		Reason:             "Active",
 		Message:            "Payment method confirmed by stripe-provider.",
 	})
-	return h.client.Status().Patch(ctx, &bm, patch)
+	return wh.Client.Status().Patch(ctx, &bm, patch)
 }

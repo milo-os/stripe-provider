@@ -26,13 +26,13 @@ import (
 )
 
 const (
-	testWebhookSecret = "whsec_test_dummy_secret_value_xx"
-	testProviderName  = "test-stripe"
+	testWebhookSecret  = "whsec_test_dummy_secret_value_xx"
+	testProviderConfig = "test-stripe"
 )
 
-// stripeSignature builds a Stripe-compatible Stripe-Signature header for
-// the given body + timestamp using the same HMAC-SHA256 scheme the
-// stripe-go webhook verifier expects.
+// stripeSignature builds a Stripe-compatible Stripe-Signature header
+// for the given body + timestamp using HMAC-SHA256, matching the format
+// the stripe-go webhook verifier expects.
 func stripeSignature(t *testing.T, body []byte, secret string, ts time.Time) string {
 	t.Helper()
 	tsStr := fmt.Sprintf("%d", ts.Unix())
@@ -43,7 +43,7 @@ func stripeSignature(t *testing.T, body []byte, secret string, ts time.Time) str
 	return "t=" + tsStr + ",v1=" + sig
 }
 
-func newTestHandler(t *testing.T, deduper *stripeinternal.MemoryDeduper, extra ...client.Object) (*handler, client.Client) {
+func newTestWebhook(t *testing.T, dedupe EventDeduper, extra ...client.Object) (*Webhook, client.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -57,7 +57,7 @@ func newTestHandler(t *testing.T, deduper *stripeinternal.MemoryDeduper, extra .
 	}
 
 	cfg := &stripev1alpha1.StripeProviderConfig{}
-	cfg.Name = testProviderName
+	cfg.Name = testProviderConfig
 	cfg.Spec.PublishableKey = "pk_test_dummy"
 	cfg.Spec.SecretKeyRef = corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "stripe-keys"},
@@ -82,104 +82,96 @@ func newTestHandler(t *testing.T, deduper *stripeinternal.MemoryDeduper, extra .
 		&billingv1alpha1.PaymentMethod{},
 	).Build()
 
-	if deduper == nil {
-		deduper = stripeinternal.NewMemoryDeduper(0)
+	wh := NewStripeWebhook(c, testProviderConfig)
+	if dedupe != nil {
+		wh.Dedupe = dedupe
 	}
-	return &handler{
-		client:             c,
-		providerConfigName: testProviderName,
-		dedupe:             deduper,
-	}, c
+	return wh, c
 }
 
 func TestWebhook_RejectsMissingSignature(t *testing.T) {
-	h, _ := newTestHandler(t, nil)
+	wh, _ := newTestWebhook(t, nil)
 	body := []byte(`{"id":"evt_1","type":"setup_intent.succeeded","data":{}}`)
-	req := httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	wh.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on missing signature, got %d (body: %s)", rec.Code, rec.Body.String())
+		t.Fatalf("expected 400 on missing signature, got %d", rec.Code)
 	}
 }
 
 func TestWebhook_RejectsInvalidSignature(t *testing.T) {
-	h, _ := newTestHandler(t, nil)
+	wh, _ := newTestWebhook(t, nil)
 	body := []byte(`{"id":"evt_1","type":"setup_intent.succeeded","data":{"object":{"id":"seti_1"}}}`)
-	req := httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req.Header.Set("Stripe-Signature", "t=1,v1=deadbeef")
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	wh.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on invalid signature, got %d (body: %s)", rec.Code, rec.Body.String())
+		t.Fatalf("expected 400 on invalid signature, got %d", rec.Code)
 	}
 }
 
 func TestWebhook_RejectsNonPost(t *testing.T) {
-	h, _ := newTestHandler(t, nil)
-	req := httptest.NewRequest(http.MethodGet, Path, nil)
+	wh, _ := newTestWebhook(t, nil)
+	req := httptest.NewRequest(http.MethodGet, Endpoint, nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	wh.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 on GET, got %d", rec.Code)
 	}
 }
 
 func TestWebhook_AcceptsValidSignedUnhandledEventNoOp(t *testing.T) {
-	h, _ := newTestHandler(t, nil)
+	wh, _ := newTestWebhook(t, nil)
 	body := []byte(`{"id":"evt_ignored","type":"customer.created","data":{"object":{"id":"cus_1"}}}`)
 	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
-	req := httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req.Header.Set("Stripe-Signature", sig)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	wh.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for unhandled event with valid signature, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 
 func TestWebhook_DedupesRepeatedEventID(t *testing.T) {
-	deduper := stripeinternal.NewMemoryDeduper(0)
-	h, _ := newTestHandler(t, deduper)
+	dedupe := stripeinternal.NewMemoryDeduper(0)
+	wh, _ := newTestWebhook(t, dedupe)
 	body := []byte(`{"id":"evt_dup","type":"customer.created","data":{"object":{"id":"cus_1"}}}`)
 	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
 
-	// First delivery: processed.
-	req := httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req.Header.Set("Stripe-Signature", sig)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	wh.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first delivery: expected 200, got %d", rec.Code)
 	}
 
-	// Second delivery with the same event id: also 200, but dropped by the deduper.
-	req2 := httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body))
+	req2 := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req2.Header.Set("Stripe-Signature", sig)
 	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, req2)
+	wh.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("duplicate delivery: expected 200, got %d", rec2.Code)
 	}
-	// Deduper should report the id as seen.
-	if !deduper.SeenOrRecord("evt_dup") {
+	if !dedupe.SeenOrRecord("evt_dup") {
 		t.Fatalf("expected deduper to have recorded evt_dup")
 	}
 }
 
 func TestWebhook_RejectsOversizedBody(t *testing.T) {
-	h, _ := newTestHandler(t, nil)
-	// Body well past maxBodyBytes (1<<18 = 262144). The handler stops
-	// reading at the cap, leaving a truncated body that won't verify.
+	wh, _ := newTestWebhook(t, nil)
+	// Past maxBodyBytes (262144). The handler truncates the read; the
+	// resulting body won't verify against the signature.
 	body := []byte(`{"id":"evt_big","type":"customer.created","data":{"object":` +
 		strings.Repeat(`"x"`, 300_000) + `}}`)
 	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
-	req := httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req.Header.Set("Stripe-Signature", sig)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	// Truncated body fails signature verification rather than producing a
-	// 200; we just assert it doesn't crash and returns a 4xx.
+	wh.ServeHTTP(rec, req)
 	if rec.Code < 400 || rec.Code >= 500 {
 		t.Fatalf("expected 4xx on oversized body, got %d", rec.Code)
 	}

@@ -49,7 +49,8 @@ spec:
             - --leader-elect-namespace=kube-system
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
-            - --webhook-bind-address=:8090
+            - --webhook-port=9443
+            - --webhook-cert-dir=/tmp/k8s-webhook-server/serving-certs
             - --provider-name=stripe
             - --provider-config=default
           ports:
@@ -59,9 +60,13 @@ spec:
             - containerPort: 8081
               name: probe
               protocol: TCP
-            - containerPort: 8090
+            - containerPort: 9443
               name: webhook
               protocol: TCP
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /healthz
@@ -87,4 +92,9 @@ spec:
             capabilities:
               drop:
                 - "ALL"
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: stripe-provider-webhook-tls
+            optional: true
       terminationGracePeriodSeconds: 30
