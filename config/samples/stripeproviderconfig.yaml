@@ -1,0 +1,43 @@
+---
+# Reference Stripe SDK credentials. Both keys must live in the
+# stripe-provider-system namespace so the resolver can dereference
+# them; see internal/stripe/resolver.go (SecretNamespace).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stripe-keys
+  namespace: stripe-provider-system
+type: Opaque
+stringData:
+  secret: sk_test_replace_me
+  webhook: whsec_replace_me
+---
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripeProviderConfig
+metadata:
+  name: default
+spec:
+  publishableKey: pk_test_replace_me
+  secretKeyRef:
+    name: stripe-keys
+    key: secret
+  webhookSecretRef:
+    name: stripe-keys
+    key: webhook
+---
+# Register the Stripe provider as the cluster-default PaymentMethodClass.
+# The defaulting webhook for PaymentMethod uses a label selector to
+# find this class and inject its name onto any PaymentMethod that does
+# not specify one.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: PaymentMethodClass
+metadata:
+  name: stripe-default
+  labels:
+    billing.miloapis.com/is-default-class: "true"
+spec:
+  provider: stripe
+  parametersRef:
+    group: stripe.billing.miloapis.com
+    kind: StripeProviderConfig
+    name: default

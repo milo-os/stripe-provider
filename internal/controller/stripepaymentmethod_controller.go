@@ -329,42 +329,39 @@ func cleanupAttempts(spm *stripev1alpha1.StripePaymentMethod) int {
 // provider it is talking to.
 //
 // Invoice routing:
-//   - When spec.billingDetails.invoiceEmail is set, it wins as the
+//   - When spec.contactInfo.invoiceEmail is set, it wins as the
 //     Stripe Customer.email (Stripe's invoice + receipt recipient).
 //   - Otherwise spec.contactInfo.email is used.
 func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) stripeinternal.CustomerDetails {
 	d := stripeinternal.CustomerDetails{}
 
-	email := ""
 	if ba.Spec.ContactInfo != nil {
-		email = ba.Spec.ContactInfo.Email
-	}
-	if ba.Spec.BillingDetails != nil && ba.Spec.BillingDetails.InvoiceEmail != "" {
-		email = ba.Spec.BillingDetails.InvoiceEmail
-	}
-	d.Email = email
-
-	if ba.Spec.BillingDetails != nil && ba.Spec.BillingDetails.Address != nil {
-		addr := ba.Spec.BillingDetails.Address
-		d.Name = joinName(addr.FirstName, addr.LastName)
-		d.Address = &stripeinternal.CustomerAddress{
-			Country:    addr.Country,
-			Line1:      addr.Line1,
-			Line2:      addr.Line2,
-			City:       addr.City,
-			State:      addr.Region,
-			PostalCode: addr.PostalCode,
+		ci := ba.Spec.ContactInfo
+		if ci.InvoiceEmail != "" {
+			d.Email = ci.InvoiceEmail
+		} else {
+			d.Email = ci.Email
+		}
+		if ci.Address != nil {
+			d.Name = joinName(ci.Address.FirstName, ci.Address.LastName)
+			d.Address = &stripeinternal.CustomerAddress{
+				Country:    ci.Address.Country,
+				Line1:      ci.Address.Line1,
+				Line2:      ci.Address.Line2,
+				City:       ci.Address.City,
+				State:      ci.Address.Region,
+				PostalCode: ci.Address.PostalCode,
+			}
+		}
+		// Fall back to contact display name when no address-derived
+		// name is available.
+		if d.Name == "" {
+			d.Name = ci.Name
 		}
 	}
-	// Fall back to contact name when no address-derived name is available.
-	if d.Name == "" && ba.Spec.ContactInfo != nil {
-		d.Name = ba.Spec.ContactInfo.Name
-	}
 
-	if ba.Spec.BillingDetails != nil {
-		for _, t := range ba.Spec.BillingDetails.TaxIDs {
-			d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
-		}
+	for _, t := range ba.Spec.TaxIDs {
+		d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
 	}
 	return d
 }
