@@ -169,11 +169,7 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 	}
 	stripe := stripeinternal.NewClient(cfg)
 
-	email := ""
-	if ba.Spec.ContactInfo != nil {
-		email = ba.Spec.ContactInfo.Email
-	}
-	customerID, err := stripe.EnsureCustomer(ctx, spm.Status.StripeCustomerID, ba.Name, email)
+	customerID, err := stripe.EnsureCustomer(ctx, spm.Status.StripeCustomerID, ba.Name, customerDetailsFromBillingAccount(&ba))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring Stripe customer: %w", err)
 	}
@@ -324,6 +320,65 @@ func cleanupAttempts(spm *stripev1alpha1.StripePaymentMethod) int {
 	var n int
 	_, _ = fmt.Sscanf(v, "%d", &n)
 	return n
+}
+
+// customerDetailsFromBillingAccount maps the billing CRD's
+// vendor-neutral schema onto the SDK wrapper's CustomerDetails. The
+// translation is one-way (BillingAccount → Stripe Customer) and lives
+// entirely in this repo — billing.miloapis.com does not know what
+// provider it is talking to.
+//
+// Invoice routing:
+//   - When spec.billingDetails.invoiceEmail is set, it wins as the
+//     Stripe Customer.email (Stripe's invoice + receipt recipient).
+//   - Otherwise spec.contactInfo.email is used.
+func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) stripeinternal.CustomerDetails {
+	d := stripeinternal.CustomerDetails{}
+
+	email := ""
+	if ba.Spec.ContactInfo != nil {
+		email = ba.Spec.ContactInfo.Email
+	}
+	if ba.Spec.BillingDetails != nil && ba.Spec.BillingDetails.InvoiceEmail != "" {
+		email = ba.Spec.BillingDetails.InvoiceEmail
+	}
+	d.Email = email
+
+	if ba.Spec.BillingDetails != nil && ba.Spec.BillingDetails.Address != nil {
+		addr := ba.Spec.BillingDetails.Address
+		d.Name = joinName(addr.FirstName, addr.LastName)
+		d.Address = &stripeinternal.CustomerAddress{
+			Country:    addr.Country,
+			Line1:      addr.Line1,
+			Line2:      addr.Line2,
+			City:       addr.City,
+			State:      addr.Region,
+			PostalCode: addr.PostalCode,
+		}
+	}
+	// Fall back to contact name when no address-derived name is available.
+	if d.Name == "" && ba.Spec.ContactInfo != nil {
+		d.Name = ba.Spec.ContactInfo.Name
+	}
+
+	if ba.Spec.BillingDetails != nil {
+		for _, t := range ba.Spec.BillingDetails.TaxIDs {
+			d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
+		}
+	}
+	return d
+}
+
+func joinName(first, last string) string {
+	switch {
+	case first != "" && last != "":
+		return first + " " + last
+	case first != "":
+		return first
+	case last != "":
+		return last
+	}
+	return ""
 }
 
 // ensurePaymentMethodAwaiting moves the parent PaymentMethod phase to

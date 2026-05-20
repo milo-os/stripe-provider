@@ -313,6 +313,7 @@ func (h *handler) patchStripeSuccess(ctx context.Context, spm *stripev1alpha1.St
 			},
 		}
 	}
+	_ = pm.BillingAddress // recorded on the billing PaymentMethod projection below
 	apimeta.SetStatusCondition(&spm.Status.Conditions, metav1.Condition{
 		Type:               "Confirmed",
 		Status:             metav1.ConditionTrue,
@@ -359,18 +360,29 @@ func (h *handler) projectOntoPaymentMethod(ctx context.Context, spm *stripev1alp
 	patch := client.MergeFrom(bm.DeepCopy())
 	bm.Status.Phase = billingv1alpha1.PaymentMethodPhaseActive
 	if pm.Type == "card" {
+		card := &billingv1alpha1.PaymentMethodCardDetails{
+			Brand:                      pm.Brand,
+			Last4:                      pm.Last4,
+			IssuerIdentificationNumber: pm.BIN,
+			Country:                    pm.Country,
+			ExpiryMonth:                pm.ExpMonth,
+			ExpiryYear:                 pm.ExpYear,
+			AVSResult:                  pm.AVSResult,
+			CVCResult:                  pm.CVCResult,
+		}
+		if pm.BillingAddress != nil {
+			card.BillingAddress = &billingv1alpha1.CardBillingAddress{
+				Country:    pm.BillingAddress.Country,
+				Line1:      pm.BillingAddress.Line1,
+				Line2:      pm.BillingAddress.Line2,
+				City:       pm.BillingAddress.City,
+				Region:     pm.BillingAddress.State,
+				PostalCode: pm.BillingAddress.PostalCode,
+			}
+		}
 		bm.Status.Details = &billingv1alpha1.PaymentMethodDetails{
 			Type: billingv1alpha1.PaymentMethodInstrumentTypeCard,
-			Card: &billingv1alpha1.PaymentMethodCardDetails{
-				Brand:                      pm.Brand,
-				Last4:                      pm.Last4,
-				IssuerIdentificationNumber: pm.BIN,
-				Country:                    pm.Country,
-				ExpiryMonth:                pm.ExpMonth,
-				ExpiryYear:                 pm.ExpYear,
-				AVSResult:                  pm.AVSResult,
-				CVCResult:                  pm.CVCResult,
-			},
+			Card: card,
 		}
 	}
 	apimeta.SetStatusCondition(&bm.Status.Conditions, metav1.Condition{

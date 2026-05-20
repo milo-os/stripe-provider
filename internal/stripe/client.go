@@ -25,29 +25,160 @@ func NewClient(cfg *ResolvedConfig) *Client {
 	return &Client{api: api}
 }
 
-// EnsureCustomer returns the existing customer id when one is recorded;
-// otherwise creates a fresh Stripe customer keyed by the billing account
-// name for idempotency.
-func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountName, email string) (string, error) {
-	if existingID != "" {
-		return existingID, nil
-	}
-	params := &stripego.CustomerParams{
-		Params: stripego.Params{
-			Context: ctx,
-			Metadata: map[string]string{
-				"billing_account": billingAccountName,
+// CustomerDetails carries the BillingAccount-derived fields that
+// stripe-provider stamps onto a Stripe Customer on every reconcile.
+// All fields are optional from the SDK's perspective; the reconciler
+// passes empty values to indicate "leave unset".
+type CustomerDetails struct {
+	// Name is the full display name (typically firstName + " " + lastName).
+	Name string
+	// Email is the invoice recipient. Falls back to the
+	// BillingAccount contact email when invoiceEmail is unset.
+	Email string
+	// Address is the postal billing address. May be nil when the
+	// BillingAccount has not provided one yet.
+	Address *CustomerAddress
+	// TaxIDs is the desired set of tax registrations. The reconciler
+	// reconciles this against the upstream Customer.tax_ids list.
+	TaxIDs []TaxIDDetails
+}
+
+// CustomerAddress mirrors Stripe's address sub-object.
+type CustomerAddress struct {
+	Country    string
+	Line1      string
+	Line2      string
+	City       string
+	State      string
+	PostalCode string
+}
+
+// TaxIDDetails is a single tax registration to ensure on the Customer.
+type TaxIDDetails struct {
+	Type  string // Stripe tax_id_data.type (e.g. "gb_vat").
+	Value string
+}
+
+// EnsureCustomer creates or updates a Stripe Customer for the supplied
+// billing account. When existingID is empty a new Customer is created;
+// otherwise the existing one is updated in place. Returns the canonical
+// `cus_…` identifier in both cases.
+func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountName string, details CustomerDetails) (string, error) {
+	if existingID == "" {
+		params := &stripego.CustomerParams{
+			Params: stripego.Params{
+				Context: ctx,
+				Metadata: map[string]string{
+					"billing_account": billingAccountName,
+				},
 			},
-		},
+		}
+		applyCustomerDetails(params, details)
+		cu, err := c.api.Customers.New(params)
+		if err != nil {
+			return "", fmt.Errorf("creating Stripe customer: %w", err)
+		}
+		// Tax IDs aren't settable on creation — apply them on a follow-up
+		// reconcileTaxIDs call so the create path stays idempotent.
+		if err := c.reconcileTaxIDs(ctx, cu.ID, details.TaxIDs); err != nil {
+			return cu.ID, err
+		}
+		return cu.ID, nil
 	}
-	if email != "" {
-		params.Email = stripego.String(email)
+
+	params := &stripego.CustomerParams{
+		Params: stripego.Params{Context: ctx},
 	}
-	cu, err := c.api.Customers.New(params)
-	if err != nil {
-		return "", fmt.Errorf("creating Stripe customer: %w", err)
+	applyCustomerDetails(params, details)
+	if _, err := c.api.Customers.Update(existingID, params); err != nil {
+		return existingID, fmt.Errorf("updating Stripe customer %q: %w", existingID, err)
 	}
-	return cu.ID, nil
+	if err := c.reconcileTaxIDs(ctx, existingID, details.TaxIDs); err != nil {
+		return existingID, err
+	}
+	return existingID, nil
+}
+
+func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
+	if d.Name != "" {
+		params.Name = stripego.String(d.Name)
+	}
+	if d.Email != "" {
+		params.Email = stripego.String(d.Email)
+	}
+	if d.Address != nil {
+		params.Address = &stripego.AddressParams{
+			Country:    nilIfEmpty(d.Address.Country),
+			Line1:      nilIfEmpty(d.Address.Line1),
+			Line2:      nilIfEmpty(d.Address.Line2),
+			City:       nilIfEmpty(d.Address.City),
+			State:      nilIfEmpty(d.Address.State),
+			PostalCode: nilIfEmpty(d.Address.PostalCode),
+		}
+	}
+}
+
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return stripego.String(s)
+}
+
+// reconcileTaxIDs ensures the Stripe Customer's tax_ids match the
+// desired set. The Stripe API doesn't support a bulk-replace, so we
+// list, diff, and apply Create/Delete deltas individually. Idempotent.
+//
+// The billing schema TaxID.type vocabulary is vendor-neutral
+// snake-case (gb_vat, eu_vat, …). Today these match Stripe's
+// tax_id_data.type values 1:1 so no translation is needed. If that
+// ever diverges, map here — not in the billing CRD.
+func (c *Client) reconcileTaxIDs(ctx context.Context, customerID string, desired []TaxIDDetails) error {
+	if customerID == "" {
+		return nil
+	}
+	// Build the existing set.
+	existing := map[string]string{} // key = "type=value", val = stripe txi_… id
+	iter := c.api.TaxIDs.List(&stripego.TaxIDListParams{
+		Customer:   stripego.String(customerID),
+		ListParams: stripego.ListParams{Context: ctx},
+	})
+	for iter.Next() {
+		t := iter.TaxID()
+		existing[string(t.Type)+"="+t.Value] = t.ID
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("listing Customer tax_ids on %q: %w", customerID, err)
+	}
+
+	desiredKeys := map[string]struct{}{}
+	for _, d := range desired {
+		key := d.Type + "=" + d.Value
+		desiredKeys[key] = struct{}{}
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		if _, err := c.api.TaxIDs.New(&stripego.TaxIDParams{
+			Customer: stripego.String(customerID),
+			Type:     stripego.String(d.Type),
+			Value:    stripego.String(d.Value),
+			Params:   stripego.Params{Context: ctx},
+		}); err != nil {
+			return fmt.Errorf("creating tax_id %s=%s on Customer %q: %w", d.Type, d.Value, customerID, err)
+		}
+	}
+	for key, id := range existing {
+		if _, want := desiredKeys[key]; want {
+			continue
+		}
+		if _, err := c.api.TaxIDs.Del(id, &stripego.TaxIDParams{
+			Customer: stripego.String(customerID),
+			Params:   stripego.Params{Context: ctx},
+		}); err != nil {
+			return fmt.Errorf("deleting tax_id %q on Customer %q: %w", id, customerID, err)
+		}
+	}
+	return nil
 }
 
 // SetupIntentResult is the subset of the Stripe SetupIntent fields the
@@ -92,16 +223,28 @@ func (c *Client) CreateSetupIntent(ctx context.Context, customerID, stripePaymen
 // PaymentMethodDetails is the subset of the Stripe PaymentMethod fields
 // the provider records.
 type PaymentMethodDetails struct {
-	ID        string
-	Type      string
-	Brand     string
-	Last4     string
-	BIN       string
-	Country   string
-	ExpMonth  int32
-	ExpYear   int32
-	AVSResult string
-	CVCResult string
+	ID             string
+	Type           string
+	Brand          string
+	Last4          string
+	BIN            string
+	Country        string
+	ExpMonth       int32
+	ExpYear        int32
+	AVSResult      string
+	CVCResult      string
+	BillingAddress *PaymentMethodBillingAddress
+}
+
+// PaymentMethodBillingAddress is the cardholder address as recorded
+// against the confirmed payment method (Stripe billing_details.address).
+type PaymentMethodBillingAddress struct {
+	Country    string
+	Line1      string
+	Line2      string
+	City       string
+	State      string
+	PostalCode string
 }
 
 // DetachPaymentMethod detaches a PaymentMethod from its Stripe customer.
@@ -167,6 +310,19 @@ func (c *Client) RetrievePaymentMethod(ctx context.Context, paymentMethodID stri
 		if pm.Card.Checks != nil {
 			out.AVSResult = firstNonEmpty(string(pm.Card.Checks.AddressLine1Check), string(pm.Card.Checks.AddressPostalCodeCheck))
 			out.CVCResult = string(pm.Card.Checks.CVCCheck)
+		}
+	}
+	if pm.BillingDetails != nil && pm.BillingDetails.Address != nil {
+		a := pm.BillingDetails.Address
+		if a.Country != "" || a.Line1 != "" || a.Line2 != "" || a.City != "" || a.State != "" || a.PostalCode != "" {
+			out.BillingAddress = &PaymentMethodBillingAddress{
+				Country:    a.Country,
+				Line1:      a.Line1,
+				Line2:      a.Line2,
+				City:       a.City,
+				State:      a.State,
+				PostalCode: a.PostalCode,
+			}
 		}
 	}
 	return out, nil
