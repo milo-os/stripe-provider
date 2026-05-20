@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stripe-provider
+  namespace: stripe-provider-system
+  labels:
+    control-plane: stripe-provider
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      control-plane: stripe-provider
+  template:
+    metadata:
+      labels:
+        control-plane: stripe-provider
+        app.kubernetes.io/name: stripe-provider
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+    spec:
+      serviceAccountName: stripe-provider
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    control-plane: stripe-provider
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              control-plane: stripe-provider
+      containers:
+        - name: manager
+          image: ghcr.io/milo-os/stripe-provider:dev
+          args:
+            - --leader-elect
+            - --leader-elect-namespace=kube-system
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --webhook-bind-address=:8090
+            - --provider-name=stripe
+            - --provider-config=default
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 8081
+              name: probe
+              protocol: TCP
+            - containerPort: 8090
+              name: webhook
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - "ALL"
+      terminationGracePeriodSeconds: 30

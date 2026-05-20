@@ -45,6 +45,12 @@ rules:
 - apiGroups:
   - stripe.billing.miloapis.com
   resources:
+  - stripepaymentmethods/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
   - stripepaymentmethods/status
   verbs:
   - get

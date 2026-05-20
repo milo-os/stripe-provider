@@ -104,6 +104,50 @@ type PaymentMethodDetails struct {
 	CVCResult string
 }
 
+// DetachPaymentMethod detaches a PaymentMethod from its Stripe customer.
+// Idempotent: a PaymentMethod that has already been detached (or was
+// never attached) returns nil so callers can treat the failure mode as
+// "already cleaned up".
+func (c *Client) DetachPaymentMethod(ctx context.Context, paymentMethodID string) error {
+	if paymentMethodID == "" {
+		return nil
+	}
+	if _, err := c.api.PaymentMethods.Detach(paymentMethodID, &stripego.PaymentMethodDetachParams{
+		Params: stripego.Params{Context: ctx},
+	}); err != nil {
+		if stripeErr, ok := err.(*stripego.Error); ok {
+			// resource_missing — Stripe has no record of the PM (already
+			// detached, deleted, never created). Idempotent path.
+			if stripeErr.Code == stripego.ErrorCodeResourceMissing {
+				return nil
+			}
+		}
+		return fmt.Errorf("detaching PaymentMethod %q: %w", paymentMethodID, err)
+	}
+	return nil
+}
+
+// CancelSetupIntent cancels a SetupIntent. Idempotent on the
+// resource_missing and already-canceled / already-succeeded states.
+func (c *Client) CancelSetupIntent(ctx context.Context, setupIntentID string) error {
+	if setupIntentID == "" {
+		return nil
+	}
+	if _, err := c.api.SetupIntents.Cancel(setupIntentID, &stripego.SetupIntentCancelParams{
+		Params: stripego.Params{Context: ctx},
+	}); err != nil {
+		if stripeErr, ok := err.(*stripego.Error); ok {
+			switch stripeErr.Code {
+			case stripego.ErrorCodeResourceMissing,
+				stripego.ErrorCodeSetupIntentUnexpectedState:
+				return nil
+			}
+		}
+		return fmt.Errorf("canceling SetupIntent %q: %w", setupIntentID, err)
+	}
+	return nil
+}
+
 // RetrievePaymentMethod fetches a confirmed PaymentMethod.
 func (c *Client) RetrievePaymentMethod(ctx context.Context, paymentMethodID string) (*PaymentMethodDetails, error) {
 	pm, err := c.api.PaymentMethods.Get(paymentMethodID, &stripego.PaymentMethodParams{

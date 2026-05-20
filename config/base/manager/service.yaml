@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: stripe-provider-webhook
+  namespace: stripe-provider-system
+  labels:
+    control-plane: stripe-provider
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: stripe-provider
+  ports:
+    - name: webhook
+      port: 8090
+      targetPort: webhook
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stripe-provider-metrics
+  namespace: stripe-provider-system
+  labels:
+    control-plane: stripe-provider
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: stripe-provider
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP

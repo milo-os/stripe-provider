@@ -1,0 +1,50 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stripe-provider
+  labels:
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stripe-provider
+subjects:
+  - kind: ServiceAccount
+    name: stripe-provider
+    namespace: stripe-provider-system
+---
+# Leader election role binding — bound to a Role in kube-system created
+# by the leader-election component shipped alongside the deployment.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stripe-provider-leader-election
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stripe-provider-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: stripe-provider
+    namespace: stripe-provider-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stripe-provider-leader-election
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
