@@ -328,9 +328,15 @@ func cleanupAttempts(spm *stripev1alpha1.StripePaymentMethod) int {
 // entirely in this repo — billing.miloapis.com does not know what
 // provider it is talking to.
 //
+// Name resolution:
+//   - When spec.contactInfo.businessName is set, it wins as the
+//     Stripe Customer.name so B2B invoices print the company on the
+//     top header line.
+//   - Otherwise spec.contactInfo.name is used.
+//
 // Invoice routing:
 //   - When spec.contactInfo.invoiceEmail is set, it wins as the
-//     Stripe Customer.email (Stripe's invoice + receipt recipient).
+//     Stripe Customer.email.
 //   - Otherwise spec.contactInfo.email is used.
 func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) stripeinternal.CustomerDetails {
 	d := stripeinternal.CustomerDetails{}
@@ -342,8 +348,12 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 		} else {
 			d.Email = ci.Email
 		}
+		if ci.BusinessName != "" {
+			d.Name = ci.BusinessName
+		} else {
+			d.Name = ci.Name
+		}
 		if ci.Address != nil {
-			d.Name = joinName(ci.Address.FirstName, ci.Address.LastName)
 			d.Address = &stripeinternal.CustomerAddress{
 				Country:    ci.Address.Country,
 				Line1:      ci.Address.Line1,
@@ -353,29 +363,12 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 				PostalCode: ci.Address.PostalCode,
 			}
 		}
-		// Fall back to contact display name when no address-derived
-		// name is available.
-		if d.Name == "" {
-			d.Name = ci.Name
-		}
 	}
 
 	for _, t := range ba.Spec.TaxIDs {
 		d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
 	}
 	return d
-}
-
-func joinName(first, last string) string {
-	switch {
-	case first != "" && last != "":
-		return first + " " + last
-	case first != "":
-		return first
-	case last != "":
-		return last
-	}
-	return ""
 }
 
 // ensurePaymentMethodAwaiting moves the parent PaymentMethod phase to

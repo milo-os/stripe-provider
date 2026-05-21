@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1
+	github.com/prometheus/client_golang v1.23.2
 	github.com/stripe/stripe-go/v81 v81.4.0
 	go.miloapis.com/billing v0.0.0-00010101000000-000000000000
 	k8s.io/api v0.33.1
@@ -41,7 +42,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
@@ -73,4 +73,4 @@ require (
 	sigs.k8s.io/yaml v1.5.0 // indirect
 )
 
-replace go.miloapis.com/billing => github.com/milo-os/billing v0.1.1-0.20260520144723-ae789bfad050
+replace go.miloapis.com/billing => github.com/milo-os/billing v0.1.1-0.20260521145319-a7f86adf4ae8
