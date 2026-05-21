@@ -89,6 +89,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "name", "StripePaymentMethod")
 		os.Exit(1)
 	}
+	if err = (&controller.StripeProviderConfigReconciler{}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "name", "StripeProviderConfig")
+		os.Exit(1)
+	}
 
 	// Register the Stripe webhook on the manager's shared webhook
 	// server (port webhookPort, TLS via webhookCertDir). Public

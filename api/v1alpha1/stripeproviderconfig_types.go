@@ -51,11 +51,64 @@ type StripeProviderConfigStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// SupportedTaxIDTypes is the list of tax-ID types this Stripe
+	// integration can accept on a Customer.tax_ids entry. Published
+	// by the stripe-provider controller from the Stripe SDK's
+	// tax_id_data.type vocabulary plus a curated metadata table for
+	// display names, example formats, and the country the type
+	// belongs to.
+	//
+	// Consumers (the portal in particular) read this list to drive
+	// the Tax ID type dropdown on the billing-details form without
+	// hardcoding the Stripe vocabulary into the front-end.
+	//
+	// +kubebuilder:validation:Optional
+	// +listType=map
+	// +listMapKey=type
+	SupportedTaxIDTypes []SupportedTaxIDType `json:"supportedTaxIDTypes,omitempty"`
+
 	// ObservedGeneration is the most recent generation observed by the
 	// controller.
 	//
 	// +kubebuilder:validation:Optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+}
+
+// SupportedTaxIDType describes a single tax-ID type a Stripe-backed
+// PaymentMethodClass can accept.
+type SupportedTaxIDType struct {
+	// Type is the vendor-neutral tax-ID type code, matching the value
+	// stored on BillingAccount.spec.taxIds[].type (e.g. "gb_vat",
+	// "eu_vat", "us_ein"). For Stripe this also happens to match
+	// Stripe's own tax_id_data.type vocabulary.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[a-z]{2}_[a-z][a-z_]*$`
+	Type string `json:"type"`
+
+	// DisplayName is the human-readable label shown in the portal
+	// dropdown (e.g. "United Kingdom VAT").
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=128
+	DisplayName string `json:"displayName"`
+
+	// Example is a sample registration number used as placeholder
+	// text in the portal input (e.g. "GB123456789"). Empty when the
+	// metadata table has no curated example for this type.
+	//
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=64
+	Example string `json:"example,omitempty"`
+
+	// Country is the ISO 3166-1 alpha-2 country code the type is
+	// registered against, or "EU" for cross-jurisdictional types
+	// (e.g. EU VAT). Empty when the metadata table has no curated
+	// country mapping for this type.
+	//
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=2
+	Country string `json:"country,omitempty"`
 }
 
 // StripeProviderConfig is the Schema for the stripeproviderconfigs API.

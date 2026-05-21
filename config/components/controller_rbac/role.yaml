@@ -52,6 +52,7 @@ rules:
   - stripe.billing.miloapis.com
   resources:
   - stripepaymentmethods/status
+  - stripeproviderconfigs/status
   verbs:
   - get
   - patch
