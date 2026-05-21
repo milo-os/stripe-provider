@@ -335,16 +335,22 @@ func cleanupAttempts(spm *stripev1alpha1.StripePaymentMethod) int {
 //   - Otherwise spec.contactInfo.name is used.
 //
 // Invoice routing:
-//   - When spec.contactInfo.invoiceEmail is set, it wins as the
-//     Stripe Customer.email.
-//   - Otherwise spec.contactInfo.email is used.
+//   - When spec.contactInfo.invoiceEmails has at least one entry, the
+//     first becomes the Stripe Customer.email (Stripe's Customer
+//     record carries a single recipient). Additional entries are CC
+//     recipients; today they are stored on the billing CRD but
+//     fanning them out at invoice-send time is a follow-up (will
+//     need stripe-provider to listen for invoice.sent webhooks and
+//     forward via our own transactional pipeline — Stripe has no
+//     native multi-recipient field on the Customer).
+//   - When invoiceEmails is empty, spec.contactInfo.email is used.
 func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) stripeinternal.CustomerDetails {
 	d := stripeinternal.CustomerDetails{}
 
 	if ba.Spec.ContactInfo != nil {
 		ci := ba.Spec.ContactInfo
-		if ci.InvoiceEmail != "" {
-			d.Email = ci.InvoiceEmail
+		if len(ci.InvoiceEmails) > 0 {
+			d.Email = ci.InvoiceEmails[0]
 		} else {
 			d.Email = ci.Email
 		}

@@ -73,4 +73,4 @@ require (
 	sigs.k8s.io/yaml v1.5.0 // indirect
 )
 
-replace go.miloapis.com/billing => github.com/milo-os/billing v0.1.1-0.20260521145319-a7f86adf4ae8
+replace go.miloapis.com/billing => github.com/milo-os/billing v0.1.1-0.20260521145718-c7f2cadb8118
