@@ -7,7 +7,7 @@ require (
 	github.com/onsi/gomega v1.36.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stripe/stripe-go/v81 v81.4.0
-	go.miloapis.com/billing v0.0.0-00010101000000-000000000000
+	go.miloapis.com/billing v0.2.0
 	k8s.io/api v0.33.1
 	k8s.io/apimachinery v0.33.2
 	k8s.io/client-go v0.33.1
@@ -72,5 +72,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.7.0 // indirect
 	sigs.k8s.io/yaml v1.5.0 // indirect
 )
-
-replace go.miloapis.com/billing => github.com/milo-os/billing v0.1.1-0.20260521145718-c7f2cadb8118
