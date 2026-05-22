@@ -52,6 +52,15 @@ spec:
                 description: |-
                   APIVersion pins the Stripe API version used for outbound requests.
                   When unset, the SDK default is used.
+
+                  Stripe API credentials (secret key + webhook signing secret) are
+                  NOT carried on this CRD: surfacing SecretKeySelectors on a
+                  cluster-scoped, user-facing API leaks the secret-name vocabulary
+                  across tenants and complicates the IAM model. Deployment
+                  operators wire those secrets in via environment variables
+                  (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET) set on the controller
+                  Pod — typically sourced from a Kubernetes Secret synced out of
+                  an external secret manager.
                 type: string
               publishableKey:
                 description: |-
@@ -61,61 +70,8 @@ spec:
                   PaymentMethodClass.
                 minLength: 1
                 type: string
-              secretKeyRef:
-                description: |-
-                  SecretKeyRef references a Secret key holding the Stripe secret API
-                  key used for server-to-server calls. Required for the provider to
-                  create customers and SetupIntents.
-                properties:
-                  key:
-                    description: The key of the secret to select from.  Must be a
-                      valid secret key.
-                    type: string
-                  name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                    type: string
-                  optional:
-                    description: Specify whether the Secret or its key must be defined
-                    type: boolean
-                required:
-                - key
-                type: object
-                x-kubernetes-map-type: atomic
-              webhookSecretRef:
-                description: |-
-                  WebhookSecretRef references a Secret key holding the signing secret
-                  used to verify Stripe webhook payloads.
-                properties:
-                  key:
-                    description: The key of the secret to select from.  Must be a
-                      valid secret key.
-                    type: string
-                  name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                    type: string
-                  optional:
-                    description: Specify whether the Secret or its key must be defined
-                    type: boolean
-                required:
-                - key
-                type: object
-                x-kubernetes-map-type: atomic
             required:
             - publishableKey
-            - secretKeyRef
-            - webhookSecretRef
             type: object
           status:
             description: StripeProviderConfigStatus defines the observed state of

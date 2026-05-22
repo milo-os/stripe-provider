@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,6 +44,11 @@ func stripeSignature(t *testing.T, body []byte, secret string, ts time.Time) str
 
 func newTestWebhook(t *testing.T, dedupe EventDeduper, extra ...client.Object) (*Webhook, client.Client) {
 	t.Helper()
+	// The resolver reads Stripe SDK credentials from the controller-pod
+	// environment, not the CRD. t.Setenv tears down at end-of-test.
+	t.Setenv(stripeinternal.SecretKeyEnv, "sk_test_dummy")
+	t.Setenv(stripeinternal.WebhookSecretEnv, testWebhookSecret)
+
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("registering core scheme: %v", err)
@@ -59,23 +63,8 @@ func newTestWebhook(t *testing.T, dedupe EventDeduper, extra ...client.Object) (
 	cfg := &stripev1alpha1.StripeProviderConfig{}
 	cfg.Name = testProviderConfig
 	cfg.Spec.PublishableKey = "pk_test_dummy"
-	cfg.Spec.SecretKeyRef = corev1.SecretKeySelector{
-		LocalObjectReference: corev1.LocalObjectReference{Name: "stripe-keys"},
-		Key:                  "secret",
-	}
-	cfg.Spec.WebhookSecretRef = corev1.SecretKeySelector{
-		LocalObjectReference: corev1.LocalObjectReference{Name: "stripe-keys"},
-		Key:                  "webhook",
-	}
-	secret := &corev1.Secret{}
-	secret.Name = "stripe-keys"
-	secret.Namespace = stripeinternal.SecretNamespace
-	secret.Data = map[string][]byte{
-		"secret":  []byte("sk_test_dummy"),
-		"webhook": []byte(testWebhookSecret),
-	}
 
-	objects := []client.Object{cfg, secret}
+	objects := []client.Object{cfg}
 	objects = append(objects, extra...)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(
 		&stripev1alpha1.StripePaymentMethod{},

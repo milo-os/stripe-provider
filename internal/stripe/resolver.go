@@ -9,8 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -18,8 +18,8 @@ import (
 )
 
 // ResolvedConfig holds materialised values from a StripeProviderConfig +
-// its referenced Secrets, ready for use by the SDK client and webhook
-// verifier.
+// the controller-pod environment, ready for use by the SDK client and
+// webhook verifier.
 type ResolvedConfig struct {
 	ProviderConfigName string
 	PublishableKey     string
@@ -28,25 +28,38 @@ type ResolvedConfig struct {
 	APIVersion         string
 }
 
-// SecretNamespace is the namespace from which the Stripe provider
-// dereferences SecretKeySelector references. Pinned to keep the trust
-// boundary explicit.
-const SecretNamespace = "stripe-provider-system"
+const (
+	// SecretKeyEnv is the environment variable the controller reads to
+	// obtain the Stripe secret API key. Deployment operators source it
+	// from a Kubernetes Secret (typically backed by an external secret
+	// manager) so the credential never appears on a user-facing API
+	// resource.
+	SecretKeyEnv = "STRIPE_SECRET_KEY"
 
-// ResolveConfig loads a StripeProviderConfig by name and dereferences its
-// Secret references.
+	// WebhookSecretEnv is the environment variable the controller reads
+	// to obtain the Stripe webhook signing secret. Same sourcing model
+	// as SecretKeyEnv.
+	WebhookSecretEnv = "STRIPE_WEBHOOK_SECRET"
+)
+
+// ResolveConfig loads a StripeProviderConfig by name for its non-sensitive
+// fields and pulls the SDK credentials from the controller-pod
+// environment.
 func ResolveConfig(ctx context.Context, c client.Reader, name string) (*ResolvedConfig, error) {
 	var cfg stripev1alpha1.StripeProviderConfig
 	if err := c.Get(ctx, types.NamespacedName{Name: name}, &cfg); err != nil {
 		return nil, fmt.Errorf("getting StripeProviderConfig %q: %w", name, err)
 	}
-	sec, err := readSecretKey(ctx, c, cfg.Spec.SecretKeyRef)
-	if err != nil {
-		return nil, fmt.Errorf("reading secretKey: %w", err)
+	sec := os.Getenv(SecretKeyEnv)
+	if sec == "" {
+		return nil, fmt.Errorf("%s environment variable is empty: Stripe SDK calls cannot be authenticated", SecretKeyEnv)
 	}
-	wh, err := readSecretKey(ctx, c, cfg.Spec.WebhookSecretRef)
-	if err != nil {
-		return nil, fmt.Errorf("reading webhookSecret: %w", err)
+	wh := os.Getenv(WebhookSecretEnv)
+	if wh == "" {
+		return nil, fmt.Errorf("%s environment variable is empty: incoming Stripe webhooks cannot be verified", WebhookSecretEnv)
+	}
+	if cfg.Spec.PublishableKey == "" {
+		return nil, errors.New("StripeProviderConfig.spec.publishableKey is empty")
 	}
 	return &ResolvedConfig{
 		ProviderConfigName: cfg.Name,
@@ -55,20 +68,4 @@ func ResolveConfig(ctx context.Context, c client.Reader, name string) (*Resolved
 		WebhookSecret:      wh,
 		APIVersion:         cfg.Spec.APIVersion,
 	}, nil
-}
-
-func readSecretKey(ctx context.Context, c client.Reader, ref corev1.SecretKeySelector) (string, error) {
-	if ref.Name == "" || ref.Key == "" {
-		return "", errors.New("SecretKeySelector must set both name and key")
-	}
-	var s corev1.Secret
-	key := types.NamespacedName{Namespace: SecretNamespace, Name: ref.Name}
-	if err := c.Get(ctx, key, &s); err != nil {
-		return "", fmt.Errorf("getting Secret %s/%s: %w", key.Namespace, key.Name, err)
-	}
-	v, ok := s.Data[ref.Key]
-	if !ok {
-		return "", fmt.Errorf("secret %s/%s has no key %q", key.Namespace, key.Name, ref.Key)
-	}
-	return string(v), nil
 }

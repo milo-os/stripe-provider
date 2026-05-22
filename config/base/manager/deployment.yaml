@@ -53,6 +53,23 @@ spec:
             - --webhook-cert-dir=/tmp/k8s-webhook-server/serving-certs
             - --provider-name=stripe
             - --provider-config=default
+          env:
+            # Stripe SDK credentials are sourced from the controller's
+            # environment so they never appear on a user-facing CRD.
+            # The bundle expects a Secret named `stripe-keys` in the
+            # controller's namespace with keys `secret` + `webhook`;
+            # the deployment overlay is responsible for creating it
+            # (typically via ExternalSecret → external secret manager).
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: stripe-keys
+                  key: secret
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: stripe-keys
+                  key: webhook
           ports:
             - containerPort: 8080
               name: metrics

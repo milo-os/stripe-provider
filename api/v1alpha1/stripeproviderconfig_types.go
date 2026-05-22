@@ -3,7 +3,6 @@
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -21,21 +20,17 @@ type StripeProviderConfigSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	PublishableKey string `json:"publishableKey"`
 
-	// SecretKeyRef references a Secret key holding the Stripe secret API
-	// key used for server-to-server calls. Required for the provider to
-	// create customers and SetupIntents.
-	//
-	// +kubebuilder:validation:Required
-	SecretKeyRef corev1.SecretKeySelector `json:"secretKeyRef"`
-
-	// WebhookSecretRef references a Secret key holding the signing secret
-	// used to verify Stripe webhook payloads.
-	//
-	// +kubebuilder:validation:Required
-	WebhookSecretRef corev1.SecretKeySelector `json:"webhookSecretRef"`
-
 	// APIVersion pins the Stripe API version used for outbound requests.
 	// When unset, the SDK default is used.
+	//
+	// Stripe API credentials (secret key + webhook signing secret) are
+	// NOT carried on this CRD: surfacing SecretKeySelectors on a
+	// cluster-scoped, user-facing API leaks the secret-name vocabulary
+	// across tenants and complicates the IAM model. Deployment
+	// operators wire those secrets in via environment variables
+	// (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET) set on the controller
+	// Pod — typically sourced from a Kubernetes Secret synced out of
+	// an external secret manager.
 	//
 	// +kubebuilder:validation:Optional
 	APIVersion string `json:"apiVersion,omitempty"`
