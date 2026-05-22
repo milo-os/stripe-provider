@@ -1,0 +1,21 @@
+# Grants every authenticated milo user read access to the cluster-scoped
+# StripeProviderConfig resource. The portal walks the
+# PaymentMethodClass.parametersRef chain to read
+# StripeProviderConfig.spec.publishableKey (see
+# milo-os/billing/docs/enhancements/payment-methods.md, step 6). The
+# publishable key is, by Stripe's design, intended to ship to the
+# browser, so a cluster-wide read binding is appropriate.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: PolicyBinding
+metadata:
+  name: authenticated-user-stripe-provider-config-read
+spec:
+  roleRef:
+    name: stripe.billing.miloapis.com-stripe-provider-config-viewer
+  subjects:
+    - kind: Group
+      name: "system:authenticated"
+  resourceSelector:
+    resourceKind:
+      apiGroup: "stripe.billing.miloapis.com"
+      kind: StripeProviderConfig

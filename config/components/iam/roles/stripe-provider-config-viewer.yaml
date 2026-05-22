@@ -1,0 +1,18 @@
+# Read-only role over StripeProviderConfig. Paired with the
+# authenticated-user-stripe-provider-config-read PolicyBinding to let
+# the portal walk PaymentMethodClass.parametersRef and pick up the
+# Stripe publishable key. No write permissions: the config is operator
+# managed via Git.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: stripe.billing.miloapis.com-stripe-provider-config-viewer
+  annotations:
+    kubernetes.io/display-name: Stripe Provider Config Viewer
+    kubernetes.io/description: "View access to Stripe provider configuration resources"
+spec:
+  launchStage: Alpha
+  includedPermissions:
+    - stripe.billing.miloapis.com/stripeproviderconfigs.list
+    - stripe.billing.miloapis.com/stripeproviderconfigs.get
+    - stripe.billing.miloapis.com/stripeproviderconfigs.watch

@@ -1,0 +1,23 @@
+# StripeProviderConfig is the cluster-scoped configuration the portal
+# resolves through PaymentMethodClass.parametersRef to read the Stripe
+# publishable key. It needs IAM coverage so the bundled
+# `stripe-provider-config-viewer` Role can grant get/list/watch to
+# authenticated users without exposing write paths.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: stripe.billing.miloapis.com-stripeproviderconfig
+spec:
+  serviceRef:
+    name: "stripe.billing.miloapis.com"
+  kind: StripeProviderConfig
+  plural: stripeproviderconfigs
+  singular: stripeproviderconfig
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - patch
+    - delete
+    - watch

@@ -1,0 +1,7 @@
+# Each CRD exposed by the stripe-provider API that needs to be
+# protected by the IAM system has a corresponding protected resource
+# configuration file in this directory.
+
+resources:
+  - stripeproviderconfig.yaml
+  - stripepaymentmethod.yaml
