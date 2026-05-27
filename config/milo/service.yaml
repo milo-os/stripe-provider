@@ -18,3 +18,9 @@ spec:
     Stripe payment provider for the Datum Cloud billing service.
     Owns StripeProviderConfig (cluster-scoped SDK configuration) and
     StripePaymentMethod (per-customer setup state).
+  owner:
+    # Required by milo-os/service-catalog v0.x — the Service webhook
+    # validates that a producer-project with this name exists. Matches
+    # the convention used by datum-cloud/compute's Service registration.
+    producerProjectRef:
+      name: datum-cloud
