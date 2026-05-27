@@ -44,16 +44,36 @@ spec:
       containers:
         - name: manager
           image: ghcr.io/milo-os/stripe-provider:dev
+          # Every tunable lives in `env:` and is referenced from `args:`
+          # via $(VAR) substitution so that overlays can patch a single
+          # value without rewriting the entire args array. Matches the
+          # convention used by milo-os/billing's gateway Deployment.
           args:
-            - --leader-elect
-            - --leader-elect-namespace=kube-system
-            - --metrics-bind-address=:8080
-            - --health-probe-bind-address=:8081
-            - --webhook-port=9443
-            - --webhook-cert-dir=/tmp/k8s-webhook-server/serving-certs
-            - --provider-name=stripe
-            - --provider-config=default
+            - --leader-elect=$(LEADER_ELECT)
+            - --leader-elect-namespace=$(LEADER_ELECT_NAMESPACE)
+            - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
+            - --health-probe-bind-address=$(HEALTH_PROBE_BIND_ADDRESS)
+            - --webhook-port=$(WEBHOOK_PORT)
+            - --webhook-cert-dir=$(WEBHOOK_CERT_DIR)
+            - --provider-name=$(PROVIDER_NAME)
+            - --provider-config=$(PROVIDER_CONFIG)
           env:
+            - name: LEADER_ELECT
+              value: "true"
+            - name: LEADER_ELECT_NAMESPACE
+              value: "kube-system"
+            - name: METRICS_BIND_ADDRESS
+              value: ":8080"
+            - name: HEALTH_PROBE_BIND_ADDRESS
+              value: ":8081"
+            - name: WEBHOOK_PORT
+              value: "9443"
+            - name: WEBHOOK_CERT_DIR
+              value: "/tmp/k8s-webhook-server/serving-certs"
+            - name: PROVIDER_NAME
+              value: "stripe"
+            - name: PROVIDER_CONFIG
+              value: "default"
             # Stripe SDK credentials are sourced from the controller's
             # environment so they never appear on a user-facing CRD.
             # The bundle expects a Secret named `stripe-keys` in the
