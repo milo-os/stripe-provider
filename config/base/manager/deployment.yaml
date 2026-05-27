@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stripe-provider
+  namespace: stripe-provider-system
+  labels:
+    control-plane: stripe-provider
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      control-plane: stripe-provider
+  template:
+    metadata:
+      labels:
+        control-plane: stripe-provider
+        app.kubernetes.io/name: stripe-provider
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+    spec:
+      serviceAccountName: stripe-provider
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    control-plane: stripe-provider
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              control-plane: stripe-provider
+      containers:
+        - name: manager
+          image: ghcr.io/milo-os/stripe-provider:dev
+          # Every tunable lives in `env:` and is referenced from `args:`
+          # via $(VAR) substitution so that overlays can patch a single
+          # value without rewriting the entire args array. Matches the
+          # convention used by milo-os/billing's gateway Deployment.
+          args:
+            - --leader-elect=$(LEADER_ELECT)
+            - --leader-elect-namespace=$(LEADER_ELECT_NAMESPACE)
+            - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
+            - --health-probe-bind-address=$(HEALTH_PROBE_BIND_ADDRESS)
+            - --webhook-port=$(WEBHOOK_PORT)
+            - --webhook-cert-dir=$(WEBHOOK_CERT_DIR)
+            - --provider-name=$(PROVIDER_NAME)
+            - --provider-config=$(PROVIDER_CONFIG)
+          env:
+            - name: LEADER_ELECT
+              value: "true"
+            - name: LEADER_ELECT_NAMESPACE
+              value: "kube-system"
+            - name: METRICS_BIND_ADDRESS
+              value: ":8080"
+            - name: HEALTH_PROBE_BIND_ADDRESS
+              value: ":8081"
+            - name: WEBHOOK_PORT
+              value: "9443"
+            - name: WEBHOOK_CERT_DIR
+              value: "/tmp/k8s-webhook-server/serving-certs"
+            - name: PROVIDER_NAME
+              value: "stripe"
+            - name: PROVIDER_CONFIG
+              value: "default"
+            # Stripe SDK credentials are sourced from the controller's
+            # environment so they never appear on a user-facing CRD.
+            # The bundle expects a Secret named `stripe-keys` in the
+            # controller's namespace with keys `secret` + `webhook`;
+            # the deployment overlay is responsible for creating it
+            # (typically via ExternalSecret → external secret manager).
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: stripe-keys
+                  key: secret
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: stripe-keys
+                  key: webhook
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 8081
+              name: probe
+              protocol: TCP
+            - containerPort: 9443
+              name: webhook
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - "ALL"
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: stripe-provider-webhook-tls
+            optional: true
+      terminationGracePeriodSeconds: 30

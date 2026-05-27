@@ -1,0 +1,5 @@
+# Roles exposed by the stripe-provider service. Each role should have a
+# corresponding configuration file in this directory.
+
+resources:
+  - stripe-provider-config-viewer.yaml

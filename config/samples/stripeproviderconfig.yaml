@@ -1,0 +1,35 @@
+---
+# Sample StripeProviderConfig. Stripe API credentials are NOT carried
+# on this CRD; the controller reads them from the STRIPE_SECRET_KEY
+# and STRIPE_WEBHOOK_SECRET environment variables wired into the
+# manager Deployment (see config/base/manager/deployment.yaml).
+#
+# For local smoke testing, populate the backing Secret directly, e.g.
+#
+#   kubectl create secret generic stripe-keys \
+#     --namespace stripe-provider-system \
+#     --from-literal=secret=sk_test_replace_me \
+#     --from-literal=webhook=whsec_replace_me
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripeProviderConfig
+metadata:
+  name: default
+spec:
+  publishableKey: pk_test_replace_me
+---
+# Register the Stripe provider as the cluster-default PaymentMethodClass.
+# The defaulting webhook for PaymentMethod uses a label selector to
+# find this class and inject its name onto any PaymentMethod that does
+# not specify one.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: PaymentMethodClass
+metadata:
+  name: stripe-default
+  labels:
+    billing.miloapis.com/is-default-class: "true"
+spec:
+  provider: stripe
+  parametersRef:
+    group: stripe.billing.miloapis.com
+    kind: StripeProviderConfig
+    name: default

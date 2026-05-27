@@ -1,0 +1,21 @@
+# Build artefacts + dev caches — never copied into the image.
+bin/
+dist/
+.task/
+
+# Editor + OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Tests + docs the runtime image does not need
+test/
+docs/
+*.md
+
+# Workflows + repo metadata
+.github/
+.git/
+.gitignore
+.golangci*

@@ -1,0 +1,23 @@
+# StripePaymentMethod is the per-customer setup state owned by the
+# stripe-provider controller. Surfacing it as a ProtectedResource
+# lets follow-up PolicyBindings grant per-org read access so the
+# portal can poll status.setupIntent.clientSecret while rendering
+# the Stripe Elements form (see payment-methods.md step 6).
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: stripe.billing.miloapis.com-stripepaymentmethod
+spec:
+  serviceRef:
+    name: "stripe.billing.miloapis.com"
+  kind: StripePaymentMethod
+  plural: stripepaymentmethods
+  singular: stripepaymentmethod
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - patch
+    - delete
+    - watch

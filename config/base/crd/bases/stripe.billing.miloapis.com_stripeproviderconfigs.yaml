@@ -1,0 +1,207 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.4
+  name: stripeproviderconfigs.stripe.billing.miloapis.com
+spec:
+  group: stripe.billing.miloapis.com
+  names:
+    kind: StripeProviderConfig
+    listKind: StripeProviderConfigList
+    plural: stripeproviderconfigs
+    singular: stripeproviderconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: StripeProviderConfig is the Schema for the stripeproviderconfigs
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              StripeProviderConfigSpec defines the desired state of a
+              StripeProviderConfig. A StripeProviderConfig is referenced by a
+              PaymentMethodClass via parametersRef and carries the Stripe SDK
+              configuration the provider needs to operate.
+            properties:
+              apiVersion:
+                description: |-
+                  APIVersion pins the Stripe API version used for outbound requests.
+                  When unset, the SDK default is used.
+
+                  Stripe API credentials (secret key + webhook signing secret) are
+                  NOT carried on this CRD: surfacing SecretKeySelectors on a
+                  cluster-scoped, user-facing API leaks the secret-name vocabulary
+                  across tenants and complicates the IAM model. Deployment
+                  operators wire those secrets in via environment variables
+                  (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET) set on the controller
+                  Pod — typically sourced from a Kubernetes Secret synced out of
+                  an external secret manager.
+                type: string
+              publishableKey:
+                description: |-
+                  PublishableKey is the Stripe publishable API key used by the portal
+                  to initialize Stripe.js. This value is non-sensitive and is read by
+                  the portal directly via the parametersRef chain on
+                  PaymentMethodClass.
+                minLength: 1
+                type: string
+            required:
+            - publishableKey
+            type: object
+          status:
+            description: StripeProviderConfigStatus defines the observed state of
+              a StripeProviderConfig.
+            properties:
+              conditions:
+                description: |-
+                  Conditions represent the latest available observations of the
+                  config's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the
+                  controller.
+                format: int64
+                type: integer
+              supportedTaxIDTypes:
+                description: |-
+                  SupportedTaxIDTypes is the list of tax-ID types this Stripe
+                  integration can accept on a Customer.tax_ids entry. Published
+                  by the stripe-provider controller from the Stripe SDK's
+                  tax_id_data.type vocabulary plus a curated metadata table for
+                  display names, example formats, and the country the type
+                  belongs to.
+
+                  Consumers (the portal in particular) read this list to drive
+                  the Tax ID type dropdown on the billing-details form without
+                  hardcoding the Stripe vocabulary into the front-end.
+                items:
+                  description: |-
+                    SupportedTaxIDType describes a single tax-ID type a Stripe-backed
+                    PaymentMethodClass can accept.
+                  properties:
+                    country:
+                      description: |-
+                        Country is the ISO 3166-1 alpha-2 country code the type is
+                        registered against, or "EU" for cross-jurisdictional types
+                        (e.g. EU VAT). Empty when the metadata table has no curated
+                        country mapping for this type.
+                      maxLength: 2
+                      type: string
+                    displayName:
+                      description: |-
+                        DisplayName is the human-readable label shown in the portal
+                        dropdown (e.g. "United Kingdom VAT").
+                      maxLength: 128
+                      type: string
+                    example:
+                      description: |-
+                        Example is a sample registration number used as placeholder
+                        text in the portal input (e.g. "GB123456789"). Empty when the
+                        metadata table has no curated example for this type.
+                      maxLength: 64
+                      type: string
+                    type:
+                      description: |-
+                        Type is the vendor-neutral tax-ID type code, matching the value
+                        stored on BillingAccount.spec.taxIds[].type (e.g. "gb_vat",
+                        "eu_vat", "us_ein"). For Stripe this also happens to match
+                        Stripe's own tax_id_data.type vocabulary.
+                      pattern: ^[a-z]{2}_[a-z][a-z_]*$
+                      type: string
+                  required:
+                  - displayName
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

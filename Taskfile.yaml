@@ -1,0 +1,283 @@
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  TOOL_DIR: "{{.USER_WORKING_DIR}}/bin"
+  TEST_INFRA_REPO_REF: 'v0.6.4'
+  TEST_INFRA_CLUSTER_NAME: 'test-infra'
+  IMG_NAME: 'ghcr.io/milo-os/stripe-provider'
+  IMG_TAG: 'dev'
+  IMG: '{{.IMG_NAME}}:{{.IMG_TAG}}'
+  CONTROLLER_TOOLS_VERSION: 'v0.16.4'
+  DEFAULTER_GEN_VERSION: 'v0.32.3'
+  GOLANGCI_LINT_VERSION: 'v2.11.4'
+
+includes:
+  # Remote taskfile from datum-cloud/test-infra (milo-os/test-infra does not exist yet). Requires
+  # TASK_X_REMOTE_TASKFILES=1 in the environment. The pin lives in
+  # TEST_INFRA_REPO_REF and is bumped deliberately alongside sibling
+  # provider repos.
+  test-infra:
+    taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
+    flatten: false
+    vars:
+      REPO_REF: '{{.TEST_INFRA_REPO_REF}}'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  install-tools:
+    desc: Install required development tools into ./bin
+    silent: true
+    cmds:
+      - |
+        set -e
+        mkdir -p {{.TOOL_DIR}}
+
+        if [ ! -f "{{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}}" ]; then
+          echo "Installing controller-gen {{.CONTROLLER_TOOLS_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install sigs.k8s.io/controller-tools/cmd/controller-gen@{{.CONTROLLER_TOOLS_VERSION}}
+          mv {{.TOOL_DIR}}/controller-gen {{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}} {{.TOOL_DIR}}/controller-gen
+
+        if [ ! -f "{{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}}" ]; then
+          echo "Installing defaulter-gen {{.DEFAULTER_GEN_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install k8s.io/code-generator/cmd/defaulter-gen@{{.DEFAULTER_GEN_VERSION}}
+          mv {{.TOOL_DIR}}/defaulter-gen {{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}} {{.TOOL_DIR}}/defaulter-gen
+
+        if [ ! -f "{{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}}" ]; then
+          echo "Installing golangci-lint {{.GOLANGCI_LINT_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}}
+          mv {{.TOOL_DIR}}/golangci-lint {{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}} {{.TOOL_DIR}}/golangci-lint
+    status:
+      - test -f {{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}}
+      - test -f {{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}}
+      - test -f {{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}}
+
+  generate:
+    desc: Run code generation (deepcopy, defaults)
+    deps: [install-tools]
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Running code generation..."
+        {{.TOOL_DIR}}/controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."
+        {{.TOOL_DIR}}/defaulter-gen ./internal/config \
+          --output-file=zz_generated.defaults.go \
+          --go-header-file=hack/boilerplate.go.txt
+        echo "Code generation complete!"
+
+  manifests:
+    desc: Generate CRD, RBAC, and webhook manifests
+    deps: [install-tools]
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Generating manifests..."
+        {{.TOOL_DIR}}/controller-gen rbac:roleName=stripe-provider \
+          crd:generateEmbeddedObjectMeta=true \
+          webhook \
+          paths="./..." \
+          output:crd:artifacts:config=config/base/crd/bases \
+          output:rbac:artifacts:config=config/components/controller_rbac \
+          output:webhook:artifacts:config=config/base/webhook
+        echo "Manifests generated!"
+
+  build:
+    desc: Build the stripe-provider binary
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Building stripe-provider..."
+        mkdir -p {{.TOOL_DIR}}
+
+        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
+        GIT_TREE_STATE="clean"
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+          GIT_TREE_STATE="dirty"
+        fi
+        BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
+
+        echo "Version: ${VERSION}, Commit: ${GIT_COMMIT:0:7}, Tree: ${GIT_TREE_STATE}"
+
+        go build \
+          -ldflags="-X 'main.version=${VERSION}' \
+                    -X 'main.gitCommit=${GIT_COMMIT}' \
+                    -X 'main.gitTreeState=${GIT_TREE_STATE}' \
+                    -X 'main.buildDate=${BUILD_DATE}'" \
+          -o {{.TOOL_DIR}}/stripe-provider ./cmd/stripe-provider
+        echo "Binary built: {{.TOOL_DIR}}/stripe-provider"
+
+  test:
+    desc: Run Go tests
+    cmds:
+      - go test -timeout 5m ./... -count=1
+    silent: false
+
+  lint:
+    desc: Run golangci-lint
+    deps: [install-tools]
+    cmds:
+      - "{{.TOOL_DIR}}/golangci-lint run ./..."
+    silent: false
+
+  dev:build:
+    desc: Build the stripe-provider container image for development
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Building stripe-provider container image: {{.IMG}}"
+
+        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
+        GIT_TREE_STATE="clean"
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+          GIT_TREE_STATE="dirty"
+        fi
+        BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
+
+        # The replace directive in go.mod pins billing to a github commit,
+        # so the build context is just the repo root.
+        docker build \
+          --build-arg VERSION="${VERSION}" \
+          --build-arg GIT_COMMIT="${GIT_COMMIT}" \
+          --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+          --build-arg BUILD_DATE="${BUILD_DATE}" \
+          -f "{{.USER_WORKING_DIR}}/Dockerfile" \
+          -t "{{.IMG}}" \
+          "{{.USER_WORKING_DIR}}"
+        echo "Successfully built {{.IMG}}"
+
+  dev:load:
+    desc: Load the stripe-provider image into the kind cluster
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Loading image {{.IMG}} into kind cluster '{{.TEST_INFRA_CLUSTER_NAME}}'..."
+        kind load docker-image "{{.IMG}}" --name "{{.TEST_INFRA_CLUSTER_NAME}}"
+
+  dev:setup:
+    desc: Bring up a kind cluster and deploy the dev overlay
+    silent: true
+    cmds:
+      - task: test-infra:cluster-up
+      - task: dev:build
+      - task: dev:load
+      - task: dev:deploy
+
+  dev:deploy:
+    desc: Deploy stripe-provider using the dev overlay
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Deploying stripe-provider (dev overlay)..."
+        task test-infra:kubectl -- apply -k config/overlays/dev
+        echo "Deployed."
+
+  dev:redeploy:
+    desc: Rebuild, reload, and restart the dev deployment
+    deps:
+      - dev:build
+      - dev:load
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Redeploying stripe-provider (dev)..."
+        task test-infra:kubectl -- rollout restart -n stripe-provider-system deployment/stripe-provider || \
+          echo "Deployment not found, run 'task dev:deploy' first"
+
+  test:create-amberflo-credentials:
+    desc: Create the amberflo-credentials Secret from AMBERFLO_API_KEY (.env).
+    silent: true
+    cmds:
+      - |
+        set -e
+        if [ -z "${AMBERFLO_API_KEY}" ]; then
+          echo "ERROR: AMBERFLO_API_KEY is not set." >&2
+          echo "  Populate it in a repo-root .env file (see .env.example) or" >&2
+          echo "  export it in your shell before running this task." >&2
+          echo "  The key must be a SANDBOX key — see .env.example." >&2
+          exit 1
+        fi
+        task test-infra:kubectl -- create namespace stripe-provider-system \
+          --dry-run=client -o yaml | task test-infra:kubectl -- apply -f -
+      - |
+        set -e
+        task test-infra:kubectl -- create secret generic amberflo-credentials \
+          --namespace stripe-provider-system \
+          --from-literal=api-key="${AMBERFLO_API_KEY}" \
+          --dry-run=client -o yaml | task test-infra:kubectl -- apply -f -
+
+  test:install-dependencies:
+    desc: Install sibling deps (billing via Flux OCIRepository) and the sandbox API key Secret.
+    silent: true
+    cmds:
+      - task: test:create-amberflo-credentials
+      - |
+        set -e
+        echo "Applying billing dependency kustomization..."
+        task test-infra:kubectl -- apply -k config/dependencies/billing
+      - |
+        set -e
+        echo "Waiting for Flux OCIRepository and Kustomization to reconcile billing..."
+        task test-infra:kubectl -- -n flux-system wait ocirepository/billing \
+          --for=condition=Ready --timeout=180s
+        task test-infra:kubectl -- -n flux-system wait kustomization/billing \
+          --for=condition=Ready --timeout=300s
+      - |
+        set -e
+        # Billing's dev overlay ships the BillingAccount webhooks with a
+        # host.docker.internal URL (developer-laptop mode). In a kind-only
+        # test environment we rewrite those URLs to point at the in-cluster
+        # billing-webhook Service. Idempotent.
+        echo "Patching billing webhooks to target in-cluster Service..."
+        bash hack/patch-billing-webhooks.sh
+
+  test:deploy:
+    desc: Deploy the stripe-provider via the test-infra overlay.
+    silent: true
+    cmds:
+      - task test-infra:kubectl -- apply -k config/overlays/test-infra
+      - task test-infra:kubectl -- -n stripe-provider-system rollout status deployment/stripe-provider --timeout=180s
+
+  test:setup:
+    desc: Bring up kind, install dependencies, build/load images, deploy test overlay.
+    silent: true
+    cmds:
+      - task: test-infra:cluster-up
+      - task: test:install-dependencies
+      - task: dev:build
+      - task: dev:load
+      - task: test:deploy
+
+  e2e:
+    desc: Run chainsaw e2e tests against test/e2e.
+    silent: true
+    cmds:
+      - |
+        set -e
+        chainsaw test test/e2e --config test/e2e/.chainsaw.yaml
+
+  test:teardown:
+    desc: Tear down the kind cluster created by test:setup.
+    silent: true
+    cmds:
+      - task: test-infra:cluster-down

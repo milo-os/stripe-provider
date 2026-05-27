@@ -1,0 +1,12 @@
+# Optional component that materialises the stripe-provider-system
+# Namespace. Used by overlays that own the namespace lifecycle
+# themselves (CI, local dev, the bare `kubectl apply -k base` smoke
+# test). In production the consuming deployment (datum/infra) creates
+# the namespace itself, so the base bundle deliberately does NOT
+# include this component — pulling it in would clash with an
+# externally-managed Namespace resource.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - namespace.yaml

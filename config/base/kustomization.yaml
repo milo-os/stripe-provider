@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base composition: CRDs + manager + RBAC.
+# The controller-gen-generated ClusterRole lives under
+# ../components/controller_rbac and is wired in here so the binding in
+# manager/rbac points at a real ClusterRole.
+
+resources:
+  - crd/bases/stripe.billing.miloapis.com_stripeproviderconfigs.yaml
+  - crd/bases/stripe.billing.miloapis.com_stripepaymentmethods.yaml
+  - manager
+  - rbac
+  - ../components/controller_rbac
