@@ -1,36 +1,43 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# milo-integration wires the stripe-provider controller into a Milo control
-# plane:
+# milo-integration shapes the stripe-provider manager Deployment for use
+# against a Milo control plane. It is intentionally generic — every
+# environment-specific value (cert-manager ClusterIssuer name, trust-bundle
+# ConfigMap name, client-cert subject identity, etc.) is left to the
+# deployment overlay.
 #
-#   - Mounts the datum-control-plane-trust-bundle ConfigMap (populated by
-#     trust-manager) so the controller can verify Milo's server certificate.
-#   - Mounts a client certificate issued by the datum-control-plane
-#     ClusterIssuer for authenticating to Milo.
-#   - Replaces the base webhook-tls Secret volume with a cert-manager CSI
-#     volume, also issued by the datum-control-plane ClusterIssuer.
-#   - Mounts a discovery kubeconfig ConfigMap that tells the controller how
-#     to reach Milo. Consumers must provide this ConfigMap (named
-#     stripe-provider-discovery-kubeconfig) in the controller's namespace.
-#   - Sets KUBECONFIG so ctrl.GetConfigOrDie() reads the mounted kubeconfig
-#     and the controller talks to Milo for every resource (its own CRDs,
-#     billing's CRDs, and leader-election Leases).
+# What this component does:
+#
+#   - Removes the upstream Secret-source `webhook-tls` volume + mount so the
+#     deployment overlay can replace it cleanly with whatever cert source
+#     it prefers (typically a cert-manager CSI volume).
+#   - Sets KUBECONFIG=/etc/kubernetes/project-discovery/auth/kubeconfig.yaml
+#     so ctrl.GetConfigOrDie() reads a mounted kubeconfig and the controller
+#     talks to Milo for every resource — its own CRDs, billing's CRDs, and
+#     leader-election Leases.
 #   - Overrides LEADER_ELECT_NAMESPACE to milo-system because the upstream
-#     default (kube-system) does not exist on the Milo apiserver.
+#     default (kube-system) does not exist on Milo.
 #
-# Consumers must:
-#   - Ensure the controller's namespace has the label
-#     `infra.datum.net/inject-datum-control-plane-trust-bundle: ""` so that
-#     trust-manager populates the trust bundle ConfigMap.
-#   - Apply the controller's ClusterRole / ClusterRoleBinding to Milo so
-#     the cert-authenticated client has the RBAC it needs there.
+# What the deployment overlay must add (env-specific, see datum/infra for a
+# worked example):
+#
+#   - A `webhook-tls` volume + mount that the controller-runtime webhook
+#     server can serve from at /tmp/k8s-webhook-server/serving-certs.
+#   - A `client-cert` volume + mount at /etc/kubernetes/projects/pki/client
+#     containing the cert the kubeconfig authenticates with.
+#   - A `discovery-kubeconfig` volume + mount at
+#     /etc/kubernetes/project-discovery/auth referencing a ConfigMap that
+#     contains the kubeconfig pointed at by KUBECONFIG above.
+#   - A `trust-bundle` volume + mount at /etc/kubernetes/pki/trust
+#     containing the CA the kubeconfig references for server verification.
 
 patches:
-  # Remove the base Secret-based webhook-tls volume and volumeMount so we
-  # can replace them cleanly with a cert-manager CSI volume below. A
+  # Remove the base Secret-based webhook-tls volume and volumeMount so the
+  # deployment overlay can add its own replacement without colliding. A
   # strategic merge of same-named volumes would produce an invalid spec
-  # with both secret and csi fields set.
+  # with both `secret:` and (overlay's) `csi:` sources set on the same
+  # Volume.
   - target:
       kind: Deployment
       name: stripe-provider
@@ -40,8 +47,9 @@ patches:
       - op: remove
         path: /spec/template/spec/volumes/0
 
-  # Add the Milo-specific volumes, volumeMounts, env vars, and the
-  # CSI-based webhook cert that replaces the removed Secret-based one.
+  # Set the env vars that wire the controller to a mounted Milo kubeconfig.
+  # Only the env list is touched here — the volume sources / mount paths
+  # the kubeconfig references are an overlay concern.
   - target:
       kind: Deployment
       name: stripe-provider
@@ -60,44 +68,3 @@ patches:
                     value: /etc/kubernetes/project-discovery/auth/kubeconfig.yaml
                   - name: LEADER_ELECT_NAMESPACE
                     value: milo-system
-                volumeMounts:
-                  - mountPath: /etc/kubernetes/pki/trust
-                    name: trust-bundle
-                    readOnly: true
-                  - mountPath: /tmp/k8s-webhook-server/serving-certs
-                    name: webhook-tls
-                    readOnly: true
-                  - mountPath: /etc/kubernetes/projects/pki/client
-                    name: client-cert
-                    readOnly: true
-                  - mountPath: /etc/kubernetes/project-discovery/auth
-                    name: discovery-kubeconfig
-                    readOnly: true
-            volumes:
-              - name: trust-bundle
-                configMap:
-                  name: datum-control-plane-trust-bundle
-              - name: discovery-kubeconfig
-                configMap:
-                  name: stripe-provider-discovery-kubeconfig
-              - name: webhook-tls
-                csi:
-                  driver: csi.cert-manager.io
-                  readOnly: true
-                  volumeAttributes:
-                    csi.cert-manager.io/common-name: stripe-provider-webhook
-                    csi.cert-manager.io/fs-group: "65532"
-                    csi.cert-manager.io/issuer-kind: ClusterIssuer
-                    csi.cert-manager.io/issuer-name: datum-control-plane
-                    csi.cert-manager.io/dns-names: stripe-provider-webhook.stripe-provider-system.svc,stripe-provider-webhook.stripe-provider-system.svc.cluster.local
-              - name: client-cert
-                csi:
-                  driver: csi.cert-manager.io
-                  readOnly: true
-                  volumeAttributes:
-                    csi.cert-manager.io/common-name: system:control@stripe.billing.miloapis.com
-                    csi.cert-manager.io/fs-group: "65532"
-                    csi.cert-manager.io/issuer-kind: ClusterIssuer
-                    csi.cert-manager.io/issuer-name: datum-control-plane
-                    csi.cert-manager.io/key-usages: client auth
-                    csi.cert-manager.io/organizations: system:masters
