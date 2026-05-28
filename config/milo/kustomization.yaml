@@ -1,6 +1,0 @@
-# Resources installed into the Milo control plane (milo-system
-# namespace) alongside stripe-provider's CRDs. The companion FluxCD
-# Kustomization in datum/infra targets this directory via its own OCI
-# source.
-resources:
-  - service.yaml
