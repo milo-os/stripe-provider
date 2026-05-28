@@ -11,4 +11,6 @@ resources:
   - crd/bases/stripe.billing.miloapis.com_stripepaymentmethods.yaml
   - manager
   - rbac
+
+components:
   - ../components/controller_rbac
