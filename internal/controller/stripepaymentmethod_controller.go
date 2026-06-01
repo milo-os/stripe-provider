@@ -169,7 +169,28 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 	}
 	stripe := stripeinternal.NewClient(cfg)
 
-	customerID, err := stripe.EnsureCustomer(ctx, spm.Status.StripeCustomerID, ba.Name, customerDetailsFromBillingAccount(&ba))
+	// Deduplicate Stripe Customers across the BillingAccount. The
+	// StripePaymentMethod's own status is authoritative when set;
+	// otherwise look at sibling StripePaymentMethods in the same
+	// namespace for a Customer ID we've already attached to this BA.
+	// Without this, every PaymentMethod the user adds creates a fresh
+	// Customer in Stripe — see findExistingCustomerID for the lookup
+	// shape and internal/stripe/client.go for the metadata-search
+	// fallback used inside EnsureCustomer.
+	existingID := spm.Status.StripeCustomerID
+	if existingID == "" {
+		found, lookupErr := findExistingCustomerID(ctx, r.Client, spm.Namespace, ba.Name)
+		if lookupErr != nil {
+			return ctrl.Result{}, fmt.Errorf("looking up existing Stripe customer for BillingAccount %q: %w", ba.Name, lookupErr)
+		}
+		if found != "" {
+			logger.V(1).Info("reusing Stripe Customer from sibling StripePaymentMethod",
+				"customerID", found, "billingAccount", ba.Name)
+			existingID = found
+		}
+	}
+
+	customerID, err := stripe.EnsureCustomer(ctx, existingID, ba.Name, customerDetailsFromBillingAccount(&ba))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring Stripe customer: %w", err)
 	}
