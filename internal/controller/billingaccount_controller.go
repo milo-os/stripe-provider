@@ -9,8 +9,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
@@ -126,11 +128,20 @@ func (r *BillingAccountReconciler) buildStripeClient(ctx context.Context) (strip
 }
 
 // SetupWithManager wires the reconciler.
+//
+// The GenerationChangedPredicate filter restricts Update events to
+// those that bump metadata.generation, which Kubernetes increments only
+// when .spec changes. Without it the reconciler would fire on every
+// status write from the billing controller, every finalizer add, and
+// every label/annotation tweak — each one trailing a Stripe
+// Customers.Update + TaxIDs reconcile loop. Create and Delete events
+// still pass the predicate, so the controller still acts on the
+// transitions that matter.
 func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	r.Scheme = mgr.GetScheme()
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("billingaccount").
-		For(&billingv1alpha1.BillingAccount{}).
+		For(&billingv1alpha1.BillingAccount{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }
