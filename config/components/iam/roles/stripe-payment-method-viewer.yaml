@@ -1,0 +1,19 @@
+# Read-only role over StripePaymentMethod. Lets a holder (typically an
+# org owner / member via downstream operator wiring) get, list, and
+# watch the per-customer setup state so a UI client can read
+# `status.setupIntent.clientSecret` and react to lifecycle transitions
+# without granting write access. Writes are reserved for the
+# stripe-provider controller.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: stripe.billing.miloapis.com-stripe-payment-method-viewer
+  annotations:
+    kubernetes.io/display-name: Stripe Payment Method Viewer
+    kubernetes.io/description: "Read-only access to StripePaymentMethod resources"
+spec:
+  launchStage: Alpha
+  includedPermissions:
+    - stripe.billing.miloapis.com/stripepaymentmethods.list
+    - stripe.billing.miloapis.com/stripepaymentmethods.get
+    - stripe.billing.miloapis.com/stripepaymentmethods.watch

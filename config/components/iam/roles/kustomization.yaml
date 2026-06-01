@@ -3,3 +3,4 @@
 
 resources:
   - stripe-provider-config-viewer.yaml
+  - stripe-payment-method-viewer.yaml
