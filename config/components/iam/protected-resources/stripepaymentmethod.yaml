@@ -21,3 +21,14 @@ spec:
     - patch
     - delete
     - watch
+  # StripePaymentMethod is created by the stripe-provider controller as
+  # an owner-referenced child of a billing.miloapis.com PaymentMethod,
+  # which itself lives in an Organization-scoped namespace
+  # (organization-<slug>). Declaring Organization as the parent lets
+  # operators issue a single org-scoped PolicyBinding (e.g. to a viewer
+  # role) and have it propagate down to every StripePaymentMethod under
+  # that org, mirroring the pattern milo-os/billing uses for
+  # BillingAccount.
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Organization
