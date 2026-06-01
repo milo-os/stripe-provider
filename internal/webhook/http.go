@@ -237,9 +237,26 @@ func (wh *Webhook) handleSetupIntentSucceeded(ctx context.Context, event *stripe
 	if err != nil {
 		return err
 	}
-	pmDetails, err := stripeinternal.NewClient(cfg).RetrievePaymentMethod(ctx, si.PaymentMethod)
+	stripeClient := stripeinternal.NewClient(cfg)
+	pmDetails, err := stripeClient.RetrievePaymentMethod(ctx, si.PaymentMethod)
 	if err != nil {
 		return fmt.Errorf("retrieving PaymentMethod for SetupIntent %q: %w", si.ID, err)
+	}
+	// Lift the cardholder name onto the Customer record when the
+	// BillingAccount didn't supply one. Stripe Elements captures
+	// "Full name" on the add-card form into PaymentMethod.billing_details.name,
+	// but that lives per-PaymentMethod; the dashboard's Customer-level
+	// "Individual name" stays blank until something promotes it.
+	// BackfillCustomerName is a no-op when Customer.name is already set,
+	// so business names entered via the BillingAccount form are safe.
+	if pmDetails.Name != "" && si.Customer != "" {
+		if err := stripeClient.BackfillCustomerName(ctx, si.Customer, pmDetails.Name); err != nil {
+			// Non-fatal: the PaymentMethod is still attached and our
+			// state is consistent; only the Stripe-side display name
+			// missed the backfill. Surface in logs and continue.
+			log.Error(err, "backfilling Stripe Customer.name from PaymentMethod billing_details",
+				"customer", si.Customer, "paymentMethod", si.PaymentMethod)
+		}
 	}
 	if err := wh.patchStripeSuccess(ctx, spm, si, pmDetails); err != nil {
 		return err
