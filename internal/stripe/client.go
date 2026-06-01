@@ -60,10 +60,21 @@ type TaxIDDetails struct {
 }
 
 // EnsureCustomer creates or updates a Stripe Customer for the supplied
-// billing account. When existingID is empty a new Customer is created;
-// otherwise the existing one is updated in place. Returns the canonical
-// `cus_…` identifier in both cases.
+// billing account. When existingID is empty the caller is asking us to
+// either find or create the matching Customer. Before creating we ask
+// Stripe whether a Customer tagged with `metadata.billing_account =
+// <name>` already exists, so a controller restart that lost local
+// status (or a freshly-rebuilt cluster) doesn't mint duplicate
+// Customers. Returns the canonical `cus_…` identifier in all cases.
 func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountName string, details CustomerDetails) (string, error) {
+	if existingID == "" && billingAccountName != "" {
+		found, err := c.findCustomerByBillingAccount(ctx, billingAccountName)
+		if err != nil {
+			return "", fmt.Errorf("searching Stripe customer for BillingAccount %q: %w", billingAccountName, err)
+		}
+		existingID = found
+	}
+
 	if existingID == "" {
 		params := &stripego.CustomerParams{
 			Params: stripego.Params{
@@ -97,6 +108,51 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountN
 		return existingID, err
 	}
 	return existingID, nil
+}
+
+// findCustomerByBillingAccount queries Stripe's customer search for the
+// first Customer carrying `metadata.billing_account = name`. Returns
+// "" when no match exists. Errors are surfaced to the caller so the
+// reconciler can requeue rather than silently fall back to creating a
+// duplicate; transient search outages are loud rather than corrupting
+// state.
+//
+// Stripe customer search is eventually consistent (typically <1s after a
+// create), so a tight create/lookup cycle on a fresh BillingAccount may
+// still produce a duplicate. The local-state lookup
+// (findExistingCustomerID in the controller package) catches the common
+// case; this exists for cold-start recovery scenarios where local
+// status was lost.
+func (c *Client) findCustomerByBillingAccount(ctx context.Context, billingAccountName string) (string, error) {
+	params := &stripego.CustomerSearchParams{
+		SearchParams: stripego.SearchParams{
+			Context: ctx,
+			Query:   fmt.Sprintf("metadata['billing_account']:'%s'", escapeSearchQueryValue(billingAccountName)),
+			Limit:   stripego.Int64(1),
+		},
+	}
+	iter := c.api.Customers.Search(params)
+	if iter.Next() {
+		return iter.Customer().ID, nil
+	}
+	if err := iter.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+// escapeSearchQueryValue escapes single quotes in a Stripe search query
+// value. BillingAccount names are generated slugs today so this is
+// belt-and-braces, but the surface area is small enough to bake in.
+func escapeSearchQueryValue(v string) string {
+	out := make([]byte, 0, len(v))
+	for i := 0; i < len(v); i++ {
+		if v[i] == '\'' || v[i] == '\\' {
+			out = append(out, '\\')
+		}
+		out = append(out, v[i])
+	}
+	return string(out)
 }
 
 func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
