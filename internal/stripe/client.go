@@ -279,8 +279,13 @@ func (c *Client) CreateSetupIntent(ctx context.Context, customerID, stripePaymen
 // PaymentMethodDetails is the subset of the Stripe PaymentMethod fields
 // the provider records.
 type PaymentMethodDetails struct {
-	ID             string
-	Type           string
+	ID   string
+	Type string
+	// Name is the cardholder name from PaymentMethod.billing_details.name,
+	// i.e. whatever the user typed into the Stripe Elements "Full name"
+	// input on the add-card form. Surfaced so the webhook can backfill
+	// the Customer-level name when the BillingAccount didn't carry one.
+	Name           string
 	Brand          string
 	Last4          string
 	BIN            string
@@ -368,20 +373,58 @@ func (c *Client) RetrievePaymentMethod(ctx context.Context, paymentMethodID stri
 			out.CVCResult = string(pm.Card.Checks.CVCCheck)
 		}
 	}
-	if pm.BillingDetails != nil && pm.BillingDetails.Address != nil {
-		a := pm.BillingDetails.Address
-		if a.Country != "" || a.Line1 != "" || a.Line2 != "" || a.City != "" || a.State != "" || a.PostalCode != "" {
-			out.BillingAddress = &PaymentMethodBillingAddress{
-				Country:    a.Country,
-				Line1:      a.Line1,
-				Line2:      a.Line2,
-				City:       a.City,
-				State:      a.State,
-				PostalCode: a.PostalCode,
+	if pm.BillingDetails != nil {
+		out.Name = pm.BillingDetails.Name
+		if pm.BillingDetails.Address != nil {
+			a := pm.BillingDetails.Address
+			if a.Country != "" || a.Line1 != "" || a.Line2 != "" || a.City != "" || a.State != "" || a.PostalCode != "" {
+				out.BillingAddress = &PaymentMethodBillingAddress{
+					Country:    a.Country,
+					Line1:      a.Line1,
+					Line2:      a.Line2,
+					City:       a.City,
+					State:      a.State,
+					PostalCode: a.PostalCode,
+				}
 			}
 		}
 	}
 	return out, nil
+}
+
+// BackfillCustomerName sets Stripe Customer.name to the supplied value
+// only when the upstream record carries no name yet. The webhook uses
+// this after a SetupIntent confirms to lift the cardholder name from
+// PaymentMethod.billing_details.name onto the Customer (so the Stripe
+// dashboard's "Individual name" field is populated) without
+// overwriting a business or contact name a user has already entered
+// via the BillingAccount form.
+//
+// Idempotent: empty inputs, an already-set Customer.name, or a missing
+// Customer all return nil.
+func (c *Client) BackfillCustomerName(ctx context.Context, customerID, name string) error {
+	if customerID == "" || name == "" {
+		return nil
+	}
+	cu, err := c.api.Customers.Get(customerID, &stripego.CustomerParams{
+		Params: stripego.Params{Context: ctx},
+	})
+	if err != nil {
+		if stripeErr, ok := err.(*stripego.Error); ok && stripeErr.Code == stripego.ErrorCodeResourceMissing {
+			return nil
+		}
+		return fmt.Errorf("getting Stripe customer %q: %w", customerID, err)
+	}
+	if cu.Name != "" {
+		return nil
+	}
+	if _, err := c.api.Customers.Update(customerID, &stripego.CustomerParams{
+		Name:   stripego.String(name),
+		Params: stripego.Params{Context: ctx},
+	}); err != nil {
+		return fmt.Errorf("backfilling Stripe customer %q name: %w", customerID, err)
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {
