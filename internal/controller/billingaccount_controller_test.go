@@ -6,7 +6,6 @@ import (
 	"context"
 	"sync"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -142,16 +141,12 @@ var _ = Describe("BillingAccountReconciler", func() {
 		spm.Status.StripeCustomerID = "cus_sync_001"
 		Expect(k8sClient.Status().Update(ctx, spm)).To(Succeed())
 
+		// Substituting the factory short-circuits ResolveConfig so the
+		// test doesn't need a StripeProviderConfig or STRIPE_SECRET_KEY
+		// env var in envtest.
 		fake := &fakeStripeEnsurer{}
-		// Skip ResolveConfig by using a factory that ignores cfg; the
-		// reconciler still calls ResolveConfig which we need to allow.
-		// To make this test self-contained we bypass via factory and
-		// short-circuit ResolveConfig by providing the StripeProviderConfig.
-		ensureStripeProviderConfig(ns)
-
 		r := &BillingAccountReconciler{
-			Client:             k8sClient,
-			ProviderConfigName: "default",
+			Client: k8sClient,
 			stripeClientFactory: func(_ *stripeinternal.ResolvedConfig) stripeCustomerEnsurer {
 				return fake
 			},
@@ -175,24 +170,3 @@ var _ = Describe("BillingAccountReconciler", func() {
 	})
 })
 
-// ensureStripeProviderConfig creates a minimal StripeProviderConfig
-// named "default" plus the required webhook-secret Secret so the
-// reconciler's ResolveConfig call succeeds. The fake Stripe client
-// short-circuits before any real Stripe call, but ResolveConfig still
-// has to find a config to hand the factory.
-//
-// We tolerate AlreadyExists because multiple tests in this suite share
-// the same envtest cluster.
-func ensureStripeProviderConfig(_ string) {
-	GinkgoHelper()
-	cfg := &stripev1alpha1.StripeProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
-		Spec: stripev1alpha1.StripeProviderConfigSpec{
-			PublishableKey: "pk_test_dummy",
-		},
-	}
-	err := k8sClient.Create(ctx, cfg)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		Expect(err).NotTo(HaveOccurred())
-	}
-}

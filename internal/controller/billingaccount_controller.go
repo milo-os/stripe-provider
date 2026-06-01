@@ -96,12 +96,10 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, nil
 	}
 
-	cfg, err := stripeinternal.ResolveConfig(ctx, r.Client, r.ProviderConfigName)
+	stripe, err := r.buildStripeClient(ctx)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving StripeProviderConfig: %w", err)
+		return ctrl.Result{}, err
 	}
-
-	stripe := r.buildStripeClient(cfg)
 	if _, err := stripe.EnsureCustomer(ctx, customerID, ba.Name, customerDetailsFromBillingAccount(&ba)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing Stripe customer %q from BillingAccount: %w", customerID, err)
 	}
@@ -110,11 +108,20 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	return ctrl.Result{}, nil
 }
 
-func (r *BillingAccountReconciler) buildStripeClient(cfg *stripeinternal.ResolvedConfig) stripeCustomerEnsurer {
+// buildStripeClient resolves the StripeProviderConfig and constructs
+// the SDK wrapper. When a stripeClientFactory is installed (unit
+// tests) we skip the resolve step entirely — the factory's whole
+// purpose is to substitute a fake client without standing up a
+// real config + secret in envtest.
+func (r *BillingAccountReconciler) buildStripeClient(ctx context.Context) (stripeCustomerEnsurer, error) {
 	if r.stripeClientFactory != nil {
-		return r.stripeClientFactory(cfg)
+		return r.stripeClientFactory(nil), nil
 	}
-	return stripeinternal.NewClient(cfg)
+	cfg, err := stripeinternal.ResolveConfig(ctx, r.Client, r.ProviderConfigName)
+	if err != nil {
+		return nil, fmt.Errorf("resolving StripeProviderConfig: %w", err)
+	}
+	return stripeinternal.NewClient(cfg), nil
 }
 
 // SetupWithManager wires the reconciler.
