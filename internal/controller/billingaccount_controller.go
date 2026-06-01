@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -104,6 +105,17 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, err
 	}
 	if _, err := stripe.EnsureCustomer(ctx, customerID, ba.Name, customerDetailsFromBillingAccount(&ba)); err != nil {
+		// Tax-ID rejection means the rest of the Customer record did
+		// sync; we'd just loop forever fighting a bad user-supplied
+		// value if we returned an error. The StripePaymentMethod
+		// reconciler is the surface where the user sees the tax-ID
+		// failure condition, so log here and move on.
+		var taxErr *stripeinternal.TaxIDError
+		if errors.As(err, &taxErr) {
+			logger.Info("BillingAccount sync hit a tax-ID failure on Stripe; rest of customer synced",
+				"customerID", customerID, "billingAccount", ba.Name, "error", taxErr.Underlying)
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("syncing Stripe customer %q from BillingAccount: %w", customerID, err)
 	}
 	logger.V(1).Info("synced Stripe Customer from BillingAccount",

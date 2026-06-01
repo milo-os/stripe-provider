@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -191,6 +192,20 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 	}
 
 	customerID, err := stripe.EnsureCustomer(ctx, existingID, ba.Name, customerDetailsFromBillingAccount(&ba))
+	// A TaxIDError means the Customer record itself succeeded but the
+	// tax_ids reconcile against it failed (e.g. user-supplied tax ID
+	// rejected by Stripe). The Customer ID is still authoritative and
+	// must be used downstream — failing the whole reconcile would
+	// (a) spin retries that each create a new Customer record because
+	// Stripe Search has read-after-write lag, and (b) block the
+	// SetupIntent the portal is waiting on. Surface the failure via a
+	// condition instead and proceed.
+	var taxErr *stripeinternal.TaxIDError
+	if errors.As(err, &taxErr) {
+		logger.Info("tax IDs failed to apply on Stripe customer; continuing without them",
+			"customer", customerID, "billingAccount", ba.Name, "error", taxErr.Underlying)
+		err = nil
+	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring Stripe customer: %w", err)
 	}
@@ -221,6 +236,23 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 		Reason:             "ClientSecretAvailable",
 		Message:            fmt.Sprintf("Stripe SetupIntent %s created (expires %s).", si.ID, expiresAt.Format(time.RFC3339)),
 	})
+	if taxErr != nil {
+		apimeta.SetStatusCondition(&spm.Status.Conditions, metav1.Condition{
+			Type:               "TaxIDsApplied",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: spm.Generation,
+			Reason:             "StripeRejected",
+			Message:            fmt.Sprintf("Stripe rejected one or more tax IDs on the customer; correct the values on the BillingAccount: %v", taxErr.Underlying),
+		})
+	} else {
+		apimeta.SetStatusCondition(&spm.Status.Conditions, metav1.Condition{
+			Type:               "TaxIDsApplied",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: spm.Generation,
+			Reason:             "Synced",
+			Message:            "Tax IDs reconciled against Stripe customer.",
+		})
+	}
 	spm.Status.ObservedGeneration = spm.Generation
 	if err := r.Client.Status().Patch(ctx, spm, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patching StripePaymentMethod status: %w", err)
