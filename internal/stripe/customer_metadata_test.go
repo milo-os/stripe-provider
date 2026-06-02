@@ -31,7 +31,7 @@ func TestApplyCustomerDetails_StampsMetadata(t *testing.T) {
 			BusinessName:   "Acme Ltd",
 			IndividualName: "Matt Jenkinson",
 		})
-		got := params.Params.Metadata
+		got := params.Metadata
 		if got["business_name"] != "Acme Ltd" {
 			t.Errorf("business_name: want %q, got %q", "Acme Ltd", got["business_name"])
 		}
@@ -51,7 +51,7 @@ func TestApplyCustomerDetails_StampsMetadata(t *testing.T) {
 			BusinessName:   "Acme Ltd",
 			IndividualName: "Matt Jenkinson",
 		})
-		got := params.Params.Metadata
+		got := params.Metadata
 		if got["billing_account"] != "ba-existing-1" {
 			t.Errorf("billing_account should be preserved, got %q", got["billing_account"])
 		}
@@ -67,7 +67,7 @@ func TestApplyCustomerDetails_StampsMetadata(t *testing.T) {
 		// should clear it from Stripe rather than leave stale data.
 		params := newParams(nil)
 		applyCustomerDetails(params, CustomerDetails{})
-		got := params.Params.Metadata
+		got := params.Metadata
 		if v, ok := got["business_name"]; !ok || v != "" {
 			t.Errorf("business_name should be present and empty for clear semantics, got ok=%v v=%q", ok, v)
 		}
@@ -137,6 +137,6 @@ func TestEnsureCustomer_UpdatePathSendsMetadata(t *testing.T) {
 
 func newParams(initialMetadata map[string]string) *stripego.CustomerParams {
 	return &stripego.CustomerParams{
-		Params: stripego.Params{Metadata: initialMetadata},
+		Metadata: initialMetadata,
 	}
 }

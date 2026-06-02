@@ -93,11 +93,9 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountN
 
 	if existingID == "" {
 		params := &stripego.CustomerParams{
-			Params: stripego.Params{
-				Context: ctx,
-				Metadata: map[string]string{
-					"billing_account": billingAccountName,
-				},
+			Params: stripego.Params{Context: ctx},
+			Metadata: map[string]string{
+				"billing_account": billingAccountName,
 			},
 		}
 		applyCustomerDetails(params, details)
@@ -194,11 +192,11 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 	// user removes the value from the BillingAccount. Preserve any
 	// keys the caller set before us (Customer.New uses metadata to
 	// record `billing_account` for dedup).
-	if params.Params.Metadata == nil {
-		params.Params.Metadata = map[string]string{}
+	if params.Metadata == nil {
+		params.Metadata = map[string]string{}
 	}
-	params.Params.Metadata["business_name"] = d.BusinessName
-	params.Params.Metadata["individual_name"] = d.IndividualName
+	params.Metadata["business_name"] = d.BusinessName
+	params.Metadata["individual_name"] = d.IndividualName
 }
 
 func nilIfEmpty(s string) *string {
