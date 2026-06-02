@@ -41,6 +41,22 @@ type CustomerDetails struct {
 	// TaxIDs is the desired set of tax registrations. The reconciler
 	// reconciles this against the upstream Customer.tax_ids list.
 	TaxIDs []TaxIDDetails
+	// BusinessName is the legal entity that pays, when set on the
+	// BillingAccount. Stripe's standard Customer object has a single
+	// `name` field that Name above already covers (BusinessName takes
+	// precedence in the mapper). This field is surfaced separately so
+	// the reconciler can stamp both the business and the individual
+	// name on Customer.metadata — the Stripe dashboard's "Business
+	// name" / "Individual name" detail rows are *not* derived from
+	// Customer.name and have no equivalent in the standard Customer
+	// API at v81 of stripe-go. Metadata is the next-best surface:
+	// queryable, indexable in Stripe Sigma, and visible in the
+	// metadata pane of the dashboard. Empty string clears the key.
+	BusinessName string
+	// IndividualName is the human billing contact, when set on the
+	// BillingAccount. See BusinessName for the metadata-surfacing
+	// rationale. Empty string clears the key.
+	IndividualName string
 }
 
 // CustomerAddress mirrors Stripe's address sub-object.
@@ -172,6 +188,17 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 			PostalCode: nilIfEmpty(d.Address.PostalCode),
 		}
 	}
+	// Always stamp business / individual name on metadata, even when
+	// empty — sending an empty value clears the key per Stripe's
+	// metadata merge semantics, which is the right behaviour when a
+	// user removes the value from the BillingAccount. Preserve any
+	// keys the caller set before us (Customer.New uses metadata to
+	// record `billing_account` for dedup).
+	if params.Params.Metadata == nil {
+		params.Params.Metadata = map[string]string{}
+	}
+	params.Params.Metadata["business_name"] = d.BusinessName
+	params.Params.Metadata["individual_name"] = d.IndividualName
 }
 
 func nilIfEmpty(s string) *string {

@@ -412,6 +412,13 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 		} else {
 			d.Name = ci.Name
 		}
+		// Surface both raw fields on Customer.metadata. Customer.name is
+		// a single field upstream, so we have to collapse them above —
+		// but the dashboard exposes both as separate "Business name"
+		// and "Individual name" rows, and we want both visible. See
+		// CustomerDetails for the rationale.
+		d.BusinessName = ci.BusinessName
+		d.IndividualName = ci.Name
 		if ci.Address != nil {
 			d.Address = &stripeinternal.CustomerAddress{
 				Country:    ci.Address.Country,
