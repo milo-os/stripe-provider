@@ -92,7 +92,7 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountN
 		// Tax IDs aren't settable on creation — apply them on a follow-up
 		// reconcileTaxIDs call so the create path stays idempotent.
 		if err := c.reconcileTaxIDs(ctx, cu.ID, details.TaxIDs); err != nil {
-			return cu.ID, err
+			return cu.ID, &TaxIDError{Underlying: err}
 		}
 		return cu.ID, nil
 	}
@@ -105,7 +105,7 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountN
 		return existingID, fmt.Errorf("updating Stripe customer %q: %w", existingID, err)
 	}
 	if err := c.reconcileTaxIDs(ctx, existingID, details.TaxIDs); err != nil {
-		return existingID, err
+		return existingID, &TaxIDError{Underlying: err}
 	}
 	return existingID, nil
 }

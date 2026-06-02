@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +28,10 @@ type fakeStripeEnsurer struct {
 	// stubID is returned from EnsureCustomer unless overridden. Defaults
 	// to whatever existingID the caller passed (since we're updating).
 	stubID string
+	// stubErr, when non-nil, is returned alongside the resolved ID. Used
+	// to simulate Stripe API failures (e.g. tax_id rejection wrapped in
+	// a *stripeinternal.TaxIDError).
+	stubErr error
 }
 
 type ensureCustomerCall struct {
@@ -43,10 +48,11 @@ func (f *fakeStripeEnsurer) EnsureCustomer(_ context.Context, existingID, billin
 		billingAccountName: billingAccountName,
 		details:            details,
 	})
+	id := existingID
 	if f.stubID != "" {
-		return f.stubID, nil
+		id = f.stubID
 	}
-	return existingID, nil
+	return id, f.stubErr
 }
 
 func (f *fakeStripeEnsurer) Calls() []ensureCustomerCall {
@@ -167,6 +173,76 @@ var _ = Describe("BillingAccountReconciler", func() {
 		Expect(call.details.TaxIDs).To(HaveLen(1))
 		Expect(call.details.TaxIDs[0].Type).To(Equal("gb_vat"))
 		Expect(call.details.TaxIDs[0].Value).To(Equal("GB123456789"))
+	})
+
+	It("treats a TaxIDError from EnsureCustomer as non-fatal", func() {
+		ns := "default"
+		baName := "ba-taxerr"
+
+		ba := &billingv1alpha1.BillingAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: baName, Namespace: ns},
+			Spec: billingv1alpha1.BillingAccountSpec{
+				CurrencyCode: "USD",
+				ContactInfo: &billingv1alpha1.BillingContactInfo{
+					Email: "taxerr@example.com",
+				},
+				TaxIDs: []billingv1alpha1.TaxID{
+					{Type: "gb_vat", Value: "GB12323234"}, // bad — 8 digits
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ba)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ba) })
+
+		pm := &billingv1alpha1.PaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-taxerr", Namespace: ns},
+			Spec: billingv1alpha1.PaymentMethodSpec{
+				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: baName},
+				DisplayName:       "Card",
+				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{
+					Name: "stripe-default",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pm) })
+
+		spm := &stripev1alpha1.StripePaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-taxerr", Namespace: ns},
+			Spec: stripev1alpha1.StripePaymentMethodSpec{
+				PaymentMethodRef: stripev1alpha1.PaymentMethodLocalRef{Name: pm.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, spm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, spm) })
+
+		spm.Status.StripeCustomerID = "cus_taxerr_001"
+		Expect(k8sClient.Status().Update(ctx, spm)).To(Succeed())
+
+		// EnsureCustomer returns the customer ID alongside a TaxIDError —
+		// the exact shape stripe-provider/internal/stripe returns when
+		// Stripe rejects a tax_id on a successfully-created Customer.
+		fake := &fakeStripeEnsurer{
+			stubErr: &stripeinternal.TaxIDError{
+				Underlying: fmt.Errorf("creating tax_id gb_vat=GB12323234: invalid value"),
+			},
+		}
+		r := &BillingAccountReconciler{
+			Client: k8sClient,
+			stripeClientFactory: func(_ *stripeinternal.ResolvedConfig) stripeCustomerEnsurer {
+				return fake
+			},
+		}
+
+		// The reconciler must not surface a TaxIDError as a reconcile
+		// failure. If it did, controller-runtime would retry forever
+		// while the user can't correct their tax ID (and the rest of
+		// the customer record is already in sync).
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)})
+		Expect(err).NotTo(HaveOccurred(),
+			"tax-ID rejection from Stripe must not fail the BA reconcile")
+		Expect(fake.Calls()).To(HaveLen(1),
+			"reconcile must still attempt EnsureCustomer once")
 	})
 })
 
