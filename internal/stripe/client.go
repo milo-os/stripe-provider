@@ -57,6 +57,14 @@ type CustomerDetails struct {
 	// BillingAccount. See BusinessName for the metadata-surfacing
 	// rationale. Empty string clears the key.
 	IndividualName string
+	// DefaultPaymentMethodID is the Stripe `pm_…` ID that should be
+	// recorded as Customer.invoice_settings.default_payment_method —
+	// i.e. the PaymentMethod Stripe will auto-charge for invoices and
+	// subscriptions. Empty string clears the field on Stripe, which
+	// is the right behaviour when the consumer un-sets the default on
+	// the BillingAccount or the referenced PaymentMethod hasn't yet
+	// been confirmed by Stripe (no `pm_…` ID on its child SPM).
+	DefaultPaymentMethodID string
 }
 
 // CustomerAddress mirrors Stripe's address sub-object.
@@ -197,6 +205,15 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 	}
 	params.Metadata["business_name"] = d.BusinessName
 	params.Metadata["individual_name"] = d.IndividualName
+	// Mirror the consumer's chosen default PaymentMethod onto
+	// Customer.invoice_settings.default_payment_method so Stripe's
+	// own auto-invoice machinery charges the same card the BA
+	// nominates. Always set the field — sending an empty string
+	// clears the upstream default, which is what we want when the
+	// consumer clears defaultPaymentMethodRef on the BillingAccount.
+	params.InvoiceSettings = &stripego.CustomerInvoiceSettingsParams{
+		DefaultPaymentMethod: stripego.String(d.DefaultPaymentMethodID),
+	}
 }
 
 func nilIfEmpty(s string) *string {

@@ -175,6 +175,129 @@ var _ = Describe("BillingAccountReconciler", func() {
 		Expect(call.details.TaxIDs[0].Value).To(Equal("GB123456789"))
 	})
 
+	It("propagates the BA's default PaymentMethod onto CustomerDetails", func() {
+		// Regression: the BA reconciler used to ignore
+		// spec.defaultPaymentMethodRef entirely, so flipping the
+		// consumer-side default never reached Stripe and
+		// auto-invoices kept charging whichever card Stripe
+		// happened to have on file.
+		ns := "default"
+		baName := "ba-default-sync"
+
+		ba := &billingv1alpha1.BillingAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: baName, Namespace: ns},
+			Spec: billingv1alpha1.BillingAccountSpec{
+				CurrencyCode: "USD",
+				ContactInfo: &billingv1alpha1.BillingContactInfo{
+					Email: "default-sync@example.com",
+				},
+				DefaultPaymentMethodRef: &billingv1alpha1.DefaultPaymentMethodRef{
+					Name: "pm-default-sync",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ba)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ba) })
+
+		pm := &billingv1alpha1.PaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-default-sync", Namespace: ns},
+			Spec: billingv1alpha1.PaymentMethodSpec{
+				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: baName},
+				DisplayName:       "Default card",
+				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{
+					Name: "stripe-default",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pm) })
+
+		spm := &stripev1alpha1.StripePaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-default-sync", Namespace: ns},
+			Spec: stripev1alpha1.StripePaymentMethodSpec{
+				PaymentMethodRef: stripev1alpha1.PaymentMethodLocalRef{Name: pm.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, spm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, spm) })
+
+		spm.Status.StripeCustomerID = "cus_default_sync"
+		spm.Status.StripePaymentMethodID = "pm_1AbCdEfGhIjKlMnO"
+		Expect(k8sClient.Status().Update(ctx, spm)).To(Succeed())
+
+		fake := &fakeStripeEnsurer{}
+		r := &BillingAccountReconciler{
+			Client: k8sClient,
+			stripeClientFactory: func(_ *stripeinternal.ResolvedConfig) stripeCustomerEnsurer {
+				return fake
+			},
+		}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.Calls()).To(HaveLen(1))
+		Expect(fake.Calls()[0].details.DefaultPaymentMethodID).To(Equal("pm_1AbCdEfGhIjKlMnO"),
+			"BA's defaultPaymentMethodRef must resolve to the SPM's stripe pm_… ID and flow into EnsureCustomer")
+	})
+
+	It("propagates an empty default when the BA has no defaultPaymentMethodRef", func() {
+		// Symmetric of the case above: when the consumer un-sets the
+		// default we must send an empty string to Stripe so its
+		// invoice_settings.default_payment_method clears, rather than
+		// silently leaving stale data upstream.
+		ns := "default"
+		baName := "ba-default-cleared"
+
+		ba := &billingv1alpha1.BillingAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: baName, Namespace: ns},
+			Spec: billingv1alpha1.BillingAccountSpec{
+				CurrencyCode: "USD",
+				ContactInfo:  &billingv1alpha1.BillingContactInfo{Email: "cleared@example.com"},
+				// DefaultPaymentMethodRef intentionally nil.
+			},
+		}
+		Expect(k8sClient.Create(ctx, ba)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ba) })
+
+		pm := &billingv1alpha1.PaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-cleared-default", Namespace: ns},
+			Spec: billingv1alpha1.PaymentMethodSpec{
+				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: baName},
+				DisplayName:       "Some card",
+				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pm) })
+
+		spm := &stripev1alpha1.StripePaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-cleared-default", Namespace: ns},
+			Spec: stripev1alpha1.StripePaymentMethodSpec{
+				PaymentMethodRef: stripev1alpha1.PaymentMethodLocalRef{Name: pm.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, spm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, spm) })
+
+		spm.Status.StripeCustomerID = "cus_cleared"
+		spm.Status.StripePaymentMethodID = "pm_2XyZ"
+		Expect(k8sClient.Status().Update(ctx, spm)).To(Succeed())
+
+		fake := &fakeStripeEnsurer{}
+		r := &BillingAccountReconciler{
+			Client: k8sClient,
+			stripeClientFactory: func(_ *stripeinternal.ResolvedConfig) stripeCustomerEnsurer {
+				return fake
+			},
+		}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.Calls()).To(HaveLen(1))
+		Expect(fake.Calls()[0].details.DefaultPaymentMethodID).To(BeEmpty(),
+			"un-set default on BA must propagate as empty string to clear Stripe's default")
+	})
+
 	It("treats a TaxIDError from EnsureCustomer as non-fatal", func() {
 		ns := "default"
 		baName := "ba-taxerr"

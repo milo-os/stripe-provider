@@ -140,3 +140,70 @@ func newParams(initialMetadata map[string]string) *stripego.CustomerParams {
 		Metadata: initialMetadata,
 	}
 }
+
+// TestApplyCustomerDetails_StampsDefaultPaymentMethod confirms the
+// default-PM ID lands on Customer.invoice_settings.default_payment_method
+// — i.e. the field Stripe's auto-invoice machinery reads. Empty input
+// must still result in a populated InvoiceSettings struct so the upstream
+// default gets cleared rather than left stale.
+func TestApplyCustomerDetails_StampsDefaultPaymentMethod(t *testing.T) {
+	t.Run("non-empty default flows to invoice_settings.default_payment_method", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{
+			DefaultPaymentMethodID: "pm_1AbCdEfGhIjKlMnO",
+		})
+		if params.InvoiceSettings == nil {
+			t.Fatalf("InvoiceSettings should be set, not nil")
+		}
+		if got := params.InvoiceSettings.DefaultPaymentMethod; got == nil || *got != "pm_1AbCdEfGhIjKlMnO" {
+			t.Errorf("DefaultPaymentMethod: want pm_1AbCdEfGhIjKlMnO, got %v", got)
+		}
+	})
+
+	t.Run("empty default still sets the field so Stripe clears its value", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{
+			DefaultPaymentMethodID: "",
+		})
+		if params.InvoiceSettings == nil {
+			t.Fatalf("InvoiceSettings should be set even when DefaultPaymentMethodID is empty; got nil")
+		}
+		if got := params.InvoiceSettings.DefaultPaymentMethod; got == nil || *got != "" {
+			t.Errorf("DefaultPaymentMethod: want pointer to empty string for clear semantics, got %v", got)
+		}
+	})
+}
+
+// TestEnsureCustomer_UpdatePathSendsDefaultPaymentMethod confirms the
+// form-encoded body Stripe receives carries
+// invoice_settings[default_payment_method]= on the update path.
+func TestEnsureCustomer_UpdatePathSendsDefaultPaymentMethod(t *testing.T) {
+	var postBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/v1/customers/cus_default"):
+			body, _ := io.ReadAll(r.Body)
+			postBody.Store(string(body))
+			_, _ = w.Write([]byte(`{"id":"cus_default","name":"Acme Ltd"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/tax_ids"):
+			_, _ = w.Write([]byte(`{"object":"list","data":[],"has_more":false,"url":"/v1/customers/cus_default/tax_ids"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := newClientForBackend(t, srv.URL)
+
+	_, err := c.EnsureCustomer(context.Background(), "cus_default", "ba-default", CustomerDetails{
+		DefaultPaymentMethodID: "pm_9XyZAbcDef",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCustomer update path: %v", err)
+	}
+	body, _ := postBody.Load().(string)
+	decoded, _ := url.QueryUnescape(body)
+	if !strings.Contains(decoded, "invoice_settings[default_payment_method]=pm_9XyZAbcDef") {
+		t.Errorf("update body missing invoice_settings[default_payment_method]=pm_9XyZAbcDef\nbody: %s", decoded)
+	}
+}

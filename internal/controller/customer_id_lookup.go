@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
@@ -30,6 +31,43 @@ import (
 // customer ID on status is skipped; PaymentMethod resources that have
 // been deleted underneath their child are skipped. Only deliberate
 // matches contribute to the returned ID.
+// findDefaultStripePaymentMethodID resolves the Stripe `pm_…` ID for
+// the PaymentMethod the BillingAccount has nominated as its default,
+// when that chain is complete:
+//
+//   - the BA has `spec.defaultPaymentMethodRef.name` set,
+//   - a `StripePaymentMethod` exists with that name (the watcher names
+//     SPMs to match their parent PaymentMethod),
+//   - the SPM has been confirmed and carries
+//     `status.stripePaymentMethodId`.
+//
+// Returns "" in every other case (no default, SPM not yet created,
+// SetupIntent not yet confirmed, parent PaymentMethod deleted out from
+// under the BA ref, etc.). The reconciler hands that empty string
+// through to Stripe, which clears
+// Customer.invoice_settings.default_payment_method — the right
+// behaviour every time the BA's nominated default isn't actually
+// usable upstream yet.
+func findDefaultStripePaymentMethodID(
+	ctx context.Context,
+	c client.Client,
+	ba *billingv1alpha1.BillingAccount,
+) (string, error) {
+	ref := ba.Spec.DefaultPaymentMethodRef
+	if ref == nil || ref.Name == "" {
+		return "", nil
+	}
+	var spm stripev1alpha1.StripePaymentMethod
+	key := client.ObjectKey{Namespace: ba.Namespace, Name: ref.Name}
+	if err := c.Get(ctx, key, &spm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("getting StripePaymentMethod %q for default ref: %w", ref.Name, err)
+	}
+	return spm.Status.StripePaymentMethodID, nil
+}
+
 func findExistingCustomerID(
 	ctx context.Context,
 	c client.Client,
