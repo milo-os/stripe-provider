@@ -104,17 +104,10 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	details := customerDetailsFromBillingAccount(&ba)
-	// Resolve the Stripe pm_… ID for the BA's nominated default
-	// PaymentMethod so we can mirror it onto
-	// Customer.invoice_settings.default_payment_method. Without this
-	// the consumer can toggle a default in our portal and Stripe will
-	// happily keep auto-charging whichever card it had previously.
-	defaultPMID, err := findDefaultStripePaymentMethodID(ctx, r.Client, &ba)
+	details, err := buildCustomerDetails(ctx, r.Client, &ba)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("looking up default Stripe PaymentMethod: %w", err)
+		return ctrl.Result{}, err
 	}
-	details.DefaultPaymentMethodID = defaultPMID
 	if _, err := stripe.EnsureCustomer(ctx, customerID, ba.Name, details); err != nil {
 		// Tax-ID rejection means the rest of the Customer record did
 		// sync; we'd just loop forever fighting a bad user-supplied

@@ -315,6 +315,58 @@ var _ = Describe("findDefaultStripePaymentMethodID", func() {
 	})
 })
 
+var _ = Describe("listBoundProjectNames", func() {
+	It("returns the projects of every Active binding pointing at the BA, sorted lexicographically", func() {
+		ns := "default"
+		baName := "ba-bound-projects"
+
+		ba := &billingv1alpha1.BillingAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: baName, Namespace: ns},
+			Spec: billingv1alpha1.BillingAccountSpec{
+				CurrencyCode: "USD",
+				ContactInfo:  &billingv1alpha1.BillingContactInfo{Email: "bound@example.com"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ba)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ba) })
+
+		// Three matching bindings (one Active, one Pending, one
+		// Active pointing at a different BA) plus the sort assertion.
+		mk := func(name, baRef, projectRef string, phase billingv1alpha1.BillingAccountBindingPhase) *billingv1alpha1.BillingAccountBinding {
+			b := &billingv1alpha1.BillingAccountBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: billingv1alpha1.BillingAccountBindingSpec{
+					BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: baRef},
+					ProjectRef:        billingv1alpha1.ProjectRef{Name: projectRef},
+				},
+			}
+			Expect(k8sClient.Create(ctx, b)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, b) })
+			b.Status.Phase = phase
+			Expect(k8sClient.Status().Update(ctx, b)).To(Succeed())
+			return b
+		}
+		mk("bab-zeta", baName, "zeta-project", billingv1alpha1.BillingAccountBindingPhaseActive)
+		mk("bab-alpha", baName, "alpha-project", billingv1alpha1.BillingAccountBindingPhaseActive)
+		mk("bab-superseded", baName, "superseded-project", billingv1alpha1.BillingAccountBindingPhaseSuperseded)
+		mk("bab-other-ba", "ba-someone-else", "ignored-project", billingv1alpha1.BillingAccountBindingPhaseActive)
+
+		got, err := listBoundProjectNames(ctx, k8sClient, ba)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal([]string{"alpha-project", "zeta-project"}),
+			"only Active bindings pointing at this BA should appear, in sorted order")
+	})
+
+	It("returns empty when the BA has no bindings", func() {
+		ba := &billingv1alpha1.BillingAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "ba-unbound", Namespace: "default"},
+		}
+		got, err := listBoundProjectNames(ctx, k8sClient, ba)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(BeEmpty())
+	})
+})
+
 // ensureNamespace makes a Namespace if it doesn't already exist. Used
 // by tests that need to verify the lookup is namespace-scoped — the
 // fixtures need a second namespace to live in.

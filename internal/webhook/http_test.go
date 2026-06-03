@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -163,5 +164,104 @@ func TestWebhook_RejectsOversizedBody(t *testing.T) {
 	wh.ServeHTTP(rec, req)
 	if rec.Code < 400 || rec.Code >= 500 {
 		t.Fatalf("expected 4xx on oversized body, got %d", rec.Code)
+	}
+}
+
+// TestHandleSetupIntentFailed_PropagatesToPaymentMethod verifies the
+// declined-card fix: when Stripe sends setup_intent.setup_failed, the
+// parent PaymentMethod must move to Failed with the failure reason +
+// message lifted off last_setup_error, plus an InstrumentReady=False
+// condition. Without this propagation the parent PM sat in
+// AwaitingConfirmation forever even though the SPM was marked Failed,
+// leaving the portal with a broken-looking card the user couldn't
+// understand.
+func TestHandleSetupIntentFailed_PropagatesToPaymentMethod(t *testing.T) {
+	ns := "default"
+	pmName := "pm-declined"
+	pm := &billingv1alpha1.PaymentMethod{
+		ObjectMeta: metav1.ObjectMeta{Name: pmName, Namespace: ns},
+		Spec: billingv1alpha1.PaymentMethodSpec{
+			BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: "ba-declined"},
+			DisplayName:       "Declined card",
+			PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
+		},
+		Status: billingv1alpha1.PaymentMethodStatus{
+			Phase: billingv1alpha1.PaymentMethodPhaseAwaitingConfirmation,
+		},
+	}
+	spm := &stripev1alpha1.StripePaymentMethod{
+		ObjectMeta: metav1.ObjectMeta{Name: pmName, Namespace: ns},
+		Spec: stripev1alpha1.StripePaymentMethodSpec{
+			PaymentMethodRef: stripev1alpha1.PaymentMethodLocalRef{Name: pmName},
+		},
+		Status: stripev1alpha1.StripePaymentMethodStatus{
+			Phase: stripev1alpha1.StripePaymentMethodPhaseAwaitingConfirmation,
+			SetupIntent: &stripev1alpha1.StripeSetupIntentStatus{
+				ID:     "seti_declined_test",
+				Status: "requires_payment_method",
+			},
+		},
+	}
+	wh, c := newTestWebhook(t, nil, pm, spm)
+	// Status subresource isn't writable through the fake builder
+	// (it's set above via the typed Status field on Build), so this
+	// is a no-op as long as the WithStatusSubresource registration
+	// in newTestWebhook lined the types up. Pre-create body verified.
+
+	body := []byte(`{
+		"id":"evt_failed",
+		"type":"setup_intent.setup_failed",
+		"data":{"object":{
+			"id":"seti_declined_test",
+			"status":"requires_payment_method",
+			"last_setup_error":{
+				"code":"card_declined",
+				"message":"Your card was declined."
+			},
+			"metadata":{
+				"stripe_payment_method_namespace":"default",
+				"stripe_payment_method_name":"pm-declined"
+			}
+		}}
+	}`)
+	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
+	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
+	req.Header.Set("Stripe-Signature", sig)
+	rec := httptest.NewRecorder()
+	wh.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from successful failure-event handling, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Re-read the parent PaymentMethod and assert it's flipped to
+	// Failed with the decline reason / message propagated.
+	var got billingv1alpha1.PaymentMethod
+	if err := c.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: pmName}, &got); err != nil {
+		t.Fatalf("get parent PaymentMethod: %v", err)
+	}
+	if got.Status.Phase != billingv1alpha1.PaymentMethodPhaseFailed {
+		t.Errorf("PaymentMethod.Status.Phase: want Failed, got %q", got.Status.Phase)
+	}
+	if got.Status.FailureReason != "card_declined" {
+		t.Errorf("PaymentMethod.Status.FailureReason: want card_declined, got %q", got.Status.FailureReason)
+	}
+	if got.Status.FailureMessage != "Your card was declined." {
+		t.Errorf("PaymentMethod.Status.FailureMessage: want decline message, got %q", got.Status.FailureMessage)
+	}
+	var ready *metav1.Condition
+	for i := range got.Status.Conditions {
+		if got.Status.Conditions[i].Type == billingv1alpha1.PaymentMethodConditionInstrumentReady {
+			ready = &got.Status.Conditions[i]
+			break
+		}
+	}
+	if ready == nil {
+		t.Fatalf("expected InstrumentReady condition on PaymentMethod")
+	}
+	if ready.Status != metav1.ConditionFalse {
+		t.Errorf("InstrumentReady condition: want False, got %s", ready.Status)
+	}
+	if ready.Reason != "card_declined" {
+		t.Errorf("InstrumentReady reason: want card_declined, got %q", ready.Reason)
 	}
 }

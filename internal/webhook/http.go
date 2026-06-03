@@ -273,7 +273,15 @@ func (wh *Webhook) handleSetupIntentFailed(ctx context.Context, event *stripego.
 	if err != nil || spm == nil {
 		return err
 	}
-	return wh.patchStripeFailure(ctx, spm, si)
+	if err := wh.patchStripeFailure(ctx, spm, si); err != nil {
+		return err
+	}
+	// Propagate the failure onto the parent PaymentMethod so the consumer
+	// stops seeing a never-confirmed card stuck in Pending/AwaitingConfirmation.
+	// Without this, a declined SetupIntent left the SPM marked Failed but the
+	// portal-facing PaymentMethod indefinitely waiting on a confirmation that
+	// would never come.
+	return wh.projectFailureOntoPaymentMethod(ctx, spm, si)
 }
 
 func (wh *Webhook) findStripePaymentMethod(ctx context.Context, si *setupIntentPayload) (*stripev1alpha1.StripePaymentMethod, error) {
@@ -404,6 +412,44 @@ func (wh *Webhook) projectOntoPaymentMethod(ctx context.Context, spm *stripev1al
 		ObservedGeneration: bm.Generation,
 		Reason:             "Active",
 		Message:            "Payment method confirmed by stripe-provider.",
+	})
+	return wh.Client.Status().Patch(ctx, &bm, patch)
+}
+
+// projectFailureOntoPaymentMethod mirrors patchStripeFailure onto the
+// parent PaymentMethod so a declined card stops sitting in
+// AwaitingConfirmation forever. Sets Phase=Failed plus the
+// FailureReason/FailureMessage decoded from the SetupIntent's
+// last_setup_error, and flips the InstrumentReady condition to False
+// with the same reason. Idempotent against a SetupIntent that fires the
+// event twice — the field assignments and condition update are
+// deterministic.
+func (wh *Webhook) projectFailureOntoPaymentMethod(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, si *setupIntentPayload) error {
+	var bm billingv1alpha1.PaymentMethod
+	key := types.NamespacedName{Namespace: spm.Namespace, Name: spm.Spec.PaymentMethodRef.Name}
+	if err := wh.Client.Get(ctx, key, &bm); err != nil {
+		return fmt.Errorf("getting PaymentMethod %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	patch := client.MergeFrom(bm.DeepCopy())
+	bm.Status.Phase = billingv1alpha1.PaymentMethodPhaseFailed
+	reason := "SetupIntentFailed"
+	msg := fmt.Sprintf("Stripe SetupIntent %s failed.", si.ID)
+	if si.LastSetupError != nil {
+		if si.LastSetupError.Code != "" {
+			bm.Status.FailureReason = si.LastSetupError.Code
+			reason = si.LastSetupError.Code
+		}
+		if si.LastSetupError.Message != "" {
+			bm.Status.FailureMessage = si.LastSetupError.Message
+			msg = si.LastSetupError.Message
+		}
+	}
+	apimeta.SetStatusCondition(&bm.Status.Conditions, metav1.Condition{
+		Type:               billingv1alpha1.PaymentMethodConditionInstrumentReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: bm.Generation,
+		Reason:             reason,
+		Message:            msg,
 	})
 	return wh.Client.Status().Patch(ctx, &bm, patch)
 }

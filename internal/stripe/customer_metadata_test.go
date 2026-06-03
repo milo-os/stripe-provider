@@ -4,6 +4,7 @@ package stripe
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -139,6 +140,71 @@ func newParams(initialMetadata map[string]string) *stripego.CustomerParams {
 	return &stripego.CustomerParams{
 		Metadata: initialMetadata,
 	}
+}
+
+// TestApplyCustomerDetails_StampsOrganizationsAndProjects confirms the
+// org-list and project-list lands on Customer.metadata as comma-separated
+// strings, that empty inputs clear the keys, and that a list past the
+// 500-char Stripe per-value cap is truncated with an ellipsis marker on
+// a name boundary (no half-names on the wire).
+func TestApplyCustomerDetails_StampsOrganizationsAndProjects(t *testing.T) {
+	t.Run("renders projects + organizations as comma-separated metadata", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{
+			Organizations: []string{"organization-chips-coding-tuzu8j"},
+			Projects:      []string{"matt-jenkinson-yz0y92", "bug-buddy-selzs2"},
+		})
+		if got := params.Metadata["organizations"]; got != "organization-chips-coding-tuzu8j" {
+			t.Errorf("organizations: want %q, got %q", "organization-chips-coding-tuzu8j", got)
+		}
+		if got := params.Metadata["projects"]; got != "matt-jenkinson-yz0y92, bug-buddy-selzs2" {
+			t.Errorf("projects: want %q, got %q", "matt-jenkinson-yz0y92, bug-buddy-selzs2", got)
+		}
+	})
+
+	t.Run("empty lists stamp empty strings to clear the keys", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{})
+		if v, ok := params.Metadata["organizations"]; !ok || v != "" {
+			t.Errorf("organizations: want present and empty, got ok=%v v=%q", ok, v)
+		}
+		if v, ok := params.Metadata["projects"]; !ok || v != "" {
+			t.Errorf("projects: want present and empty, got ok=%v v=%q", ok, v)
+		}
+	})
+
+	t.Run("truncates oversized project lists on a name boundary", func(t *testing.T) {
+		// Construct enough projects to overflow the 500-char Stripe
+		// per-value cap. ~30 chars per name × 25 names overflows easily.
+		names := make([]string, 25)
+		for i := range names {
+			names[i] = fmt.Sprintf("project-with-a-long-name-%02d", i)
+		}
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{Projects: names})
+		got := params.Metadata["projects"]
+		if len(got) > 500 {
+			t.Fatalf("truncated value still exceeds 500 chars: len=%d", len(got))
+		}
+		if !strings.HasSuffix(got, ", …") {
+			t.Errorf("expected ellipsis suffix on truncated list, got tail %q", got[max(0, len(got)-10):])
+		}
+		// Truncation must happen on a name boundary — the last name we
+		// included must be complete, not chopped mid-string.
+		head := strings.TrimSuffix(got, ", …")
+		parts := strings.Split(head, ", ")
+		last := parts[len(parts)-1]
+		matched := false
+		for _, name := range names {
+			if name == last {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("last entry %q is not a complete project name from the input list", last)
+		}
+	})
 }
 
 // TestApplyCustomerDetails_StampsDefaultPaymentMethod confirms the

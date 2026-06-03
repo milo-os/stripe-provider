@@ -65,6 +65,20 @@ type CustomerDetails struct {
 	// the BillingAccount or the referenced PaymentMethod hasn't yet
 	// been confirmed by Stripe (no `pm_…` ID on its child SPM).
 	DefaultPaymentMethodID string
+	// Organizations is the set of milo organizations a BillingAccount
+	// pays for. Today there's always exactly one (the BA's owning org)
+	// because milo's BA lives in the org's namespace, but the platform
+	// is moving toward multiple orgs per BA — the field is plural so
+	// callers don't have to change shape when that lands. Rendered as
+	// a comma-separated string on Customer.metadata.organizations.
+	Organizations []string
+	// Projects is the list of project names currently bound to the
+	// BillingAccount via active BillingAccountBindings. Surfaced as a
+	// comma-separated string on Customer.metadata so the Stripe
+	// dashboard shows which Datum projects this card actually funds.
+	// Stripe metadata values cap at 500 chars per key; long lists are
+	// truncated by the caller before reaching the wire.
+	Projects []string
 }
 
 // CustomerAddress mirrors Stripe's address sub-object.
@@ -205,6 +219,12 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 	}
 	params.Metadata["business_name"] = d.BusinessName
 	params.Metadata["individual_name"] = d.IndividualName
+	// Stripe caps metadata values at 500 chars. Truncate both lists at
+	// that boundary on a name boundary so we never ship a half-name; an
+	// ellipsis marker tells whoever reads the dashboard that the list
+	// was cut off.
+	params.Metadata["organizations"] = joinNamesForMetadata(d.Organizations)
+	params.Metadata["projects"] = joinNamesForMetadata(d.Projects)
 	// Mirror the consumer's chosen default PaymentMethod onto
 	// Customer.invoice_settings.default_payment_method so Stripe's
 	// own auto-invoice machinery charges the same card the BA
@@ -221,6 +241,36 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return stripego.String(s)
+}
+
+// stripeMetadataValueMax is Stripe's published per-value limit on
+// Customer.metadata (500 characters). Exceeding it triggers a 400 from
+// the upstream API.
+const stripeMetadataValueMax = 500
+
+// joinNamesForMetadata renders a list of names as a single
+// comma-separated string for Stripe metadata, truncating on a name
+// boundary when the joined value would exceed the per-value cap. Long
+// lists end in `, …` so a reader can tell the list was cut off rather
+// than just shorter than expected.
+func joinNamesForMetadata(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	const ellipsis = ", …"
+	out := ""
+	for i, n := range names {
+		next := n
+		if i > 0 {
+			next = ", " + n
+		}
+		if len(out)+len(next) > stripeMetadataValueMax-len(ellipsis) {
+			out += ellipsis
+			break
+		}
+		out += next
+	}
+	return out
 }
 
 // reconcileTaxIDs ensures the Stripe Customer's tax_ids match the
