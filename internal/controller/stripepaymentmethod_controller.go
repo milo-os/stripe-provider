@@ -191,7 +191,11 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 		}
 	}
 
-	customerID, err := stripe.EnsureCustomer(ctx, existingID, ba.Name, customerDetailsFromBillingAccount(&ba))
+	details, err := buildCustomerDetails(ctx, r.Client, &ba)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	customerID, err := stripe.EnsureCustomer(ctx, existingID, ba.Name, details)
 	// A TaxIDError means the Customer record itself succeeded but the
 	// tax_ids reconcile against it failed (e.g. user-supplied tax ID
 	// rejected by Stripe). The Customer ID is still authoritative and
@@ -433,6 +437,15 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 
 	for _, t := range ba.Spec.TaxIDs {
 		d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
+	}
+	// Organizations: today exactly one — the BA's owning org, which is
+	// also its Kubernetes namespace. milo is moving toward shared BAs
+	// across multiple orgs, at which point this mapper grows a lookup
+	// step and the plural shape is already in place. Populating from
+	// the namespace keeps the metadata accurate without speculating
+	// on the future schema.
+	if ba.Namespace != "" {
+		d.Organizations = []string{ba.Namespace}
 	}
 	return d
 }

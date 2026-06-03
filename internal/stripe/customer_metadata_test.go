@@ -4,6 +4,7 @@ package stripe
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -138,5 +139,137 @@ func TestEnsureCustomer_UpdatePathSendsMetadata(t *testing.T) {
 func newParams(initialMetadata map[string]string) *stripego.CustomerParams {
 	return &stripego.CustomerParams{
 		Metadata: initialMetadata,
+	}
+}
+
+// TestApplyCustomerDetails_StampsOrganizationsAndProjects confirms the
+// org-list and project-list lands on Customer.metadata as comma-separated
+// strings, that empty inputs clear the keys, and that a list past the
+// 500-char Stripe per-value cap is truncated with an ellipsis marker on
+// a name boundary (no half-names on the wire).
+func TestApplyCustomerDetails_StampsOrganizationsAndProjects(t *testing.T) {
+	t.Run("renders projects + organizations as comma-separated metadata", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{
+			Organizations: []string{"organization-chips-coding-tuzu8j"},
+			Projects:      []string{"matt-jenkinson-yz0y92", "bug-buddy-selzs2"},
+		})
+		if got := params.Metadata["organizations"]; got != "organization-chips-coding-tuzu8j" {
+			t.Errorf("organizations: want %q, got %q", "organization-chips-coding-tuzu8j", got)
+		}
+		if got := params.Metadata["projects"]; got != "matt-jenkinson-yz0y92, bug-buddy-selzs2" {
+			t.Errorf("projects: want %q, got %q", "matt-jenkinson-yz0y92, bug-buddy-selzs2", got)
+		}
+	})
+
+	t.Run("empty lists stamp empty strings to clear the keys", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{})
+		if v, ok := params.Metadata["organizations"]; !ok || v != "" {
+			t.Errorf("organizations: want present and empty, got ok=%v v=%q", ok, v)
+		}
+		if v, ok := params.Metadata["projects"]; !ok || v != "" {
+			t.Errorf("projects: want present and empty, got ok=%v v=%q", ok, v)
+		}
+	})
+
+	t.Run("truncates oversized project lists on a name boundary", func(t *testing.T) {
+		// Construct enough projects to overflow the 500-char Stripe
+		// per-value cap. ~30 chars per name × 25 names overflows easily.
+		names := make([]string, 25)
+		for i := range names {
+			names[i] = fmt.Sprintf("project-with-a-long-name-%02d", i)
+		}
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{Projects: names})
+		got := params.Metadata["projects"]
+		if len(got) > 500 {
+			t.Fatalf("truncated value still exceeds 500 chars: len=%d", len(got))
+		}
+		if !strings.HasSuffix(got, ", …") {
+			t.Errorf("expected ellipsis suffix on truncated list, got tail %q", got[max(0, len(got)-10):])
+		}
+		// Truncation must happen on a name boundary — the last name we
+		// included must be complete, not chopped mid-string.
+		head := strings.TrimSuffix(got, ", …")
+		parts := strings.Split(head, ", ")
+		last := parts[len(parts)-1]
+		matched := false
+		for _, name := range names {
+			if name == last {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("last entry %q is not a complete project name from the input list", last)
+		}
+	})
+}
+
+// TestApplyCustomerDetails_StampsDefaultPaymentMethod confirms the
+// default-PM ID lands on Customer.invoice_settings.default_payment_method
+// — i.e. the field Stripe's auto-invoice machinery reads. Empty input
+// must still result in a populated InvoiceSettings struct so the upstream
+// default gets cleared rather than left stale.
+func TestApplyCustomerDetails_StampsDefaultPaymentMethod(t *testing.T) {
+	t.Run("non-empty default flows to invoice_settings.default_payment_method", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{
+			DefaultPaymentMethodID: "pm_1AbCdEfGhIjKlMnO",
+		})
+		if params.InvoiceSettings == nil {
+			t.Fatalf("InvoiceSettings should be set, not nil")
+		}
+		if got := params.InvoiceSettings.DefaultPaymentMethod; got == nil || *got != "pm_1AbCdEfGhIjKlMnO" {
+			t.Errorf("DefaultPaymentMethod: want pm_1AbCdEfGhIjKlMnO, got %v", got)
+		}
+	})
+
+	t.Run("empty default still sets the field so Stripe clears its value", func(t *testing.T) {
+		params := newParams(nil)
+		applyCustomerDetails(params, CustomerDetails{
+			DefaultPaymentMethodID: "",
+		})
+		if params.InvoiceSettings == nil {
+			t.Fatalf("InvoiceSettings should be set even when DefaultPaymentMethodID is empty; got nil")
+		}
+		if got := params.InvoiceSettings.DefaultPaymentMethod; got == nil || *got != "" {
+			t.Errorf("DefaultPaymentMethod: want pointer to empty string for clear semantics, got %v", got)
+		}
+	})
+}
+
+// TestEnsureCustomer_UpdatePathSendsDefaultPaymentMethod confirms the
+// form-encoded body Stripe receives carries
+// invoice_settings[default_payment_method]= on the update path.
+func TestEnsureCustomer_UpdatePathSendsDefaultPaymentMethod(t *testing.T) {
+	var postBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/v1/customers/cus_default"):
+			body, _ := io.ReadAll(r.Body)
+			postBody.Store(string(body))
+			_, _ = w.Write([]byte(`{"id":"cus_default","name":"Acme Ltd"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/tax_ids"):
+			_, _ = w.Write([]byte(`{"object":"list","data":[],"has_more":false,"url":"/v1/customers/cus_default/tax_ids"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := newClientForBackend(t, srv.URL)
+
+	_, err := c.EnsureCustomer(context.Background(), "cus_default", "ba-default", CustomerDetails{
+		DefaultPaymentMethodID: "pm_9XyZAbcDef",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCustomer update path: %v", err)
+	}
+	body, _ := postBody.Load().(string)
+	decoded, _ := url.QueryUnescape(body)
+	if !strings.Contains(decoded, "invoice_settings[default_payment_method]=pm_9XyZAbcDef") {
+		t.Errorf("update body missing invoice_settings[default_payment_method]=pm_9XyZAbcDef\nbody: %s", decoded)
 	}
 }

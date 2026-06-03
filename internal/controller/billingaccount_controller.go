@@ -104,7 +104,11 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if _, err := stripe.EnsureCustomer(ctx, customerID, ba.Name, customerDetailsFromBillingAccount(&ba)); err != nil {
+	details, err := buildCustomerDetails(ctx, r.Client, &ba)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if _, err := stripe.EnsureCustomer(ctx, customerID, ba.Name, details); err != nil {
 		// Tax-ID rejection means the rest of the Customer record did
 		// sync; we'd just loop forever fighting a bad user-supplied
 		// value if we returned an error. The StripePaymentMethod
