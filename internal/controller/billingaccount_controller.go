@@ -9,14 +9,17 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
 	stripeinternal "go.miloapis.com/stripe-provider/internal/stripe"
 )
 
@@ -145,19 +148,96 @@ func (r *BillingAccountReconciler) buildStripeClient(ctx context.Context) (strip
 
 // SetupWithManager wires the reconciler.
 //
-// The GenerationChangedPredicate filter restricts Update events to
-// those that bump metadata.generation, which Kubernetes increments only
-// when .spec changes. Without it the reconciler would fire on every
-// status write from the billing controller, every finalizer add, and
-// every label/annotation tweak — each one trailing a Stripe
-// Customers.Update + TaxIDs reconcile loop. Create and Delete events
-// still pass the predicate, so the controller still acts on the
-// transitions that matter.
+// The GenerationChangedPredicate filter restricts BillingAccount Update
+// events to those that bump metadata.generation, which Kubernetes
+// increments only when .spec changes. Without it the reconciler would
+// fire on every status write from the billing controller, every
+// finalizer add, and every label/annotation tweak — each one trailing
+// a Stripe Customers.Update + TaxIDs reconcile loop. Create and Delete
+// events still pass the predicate.
+//
+// Two secondary watches keep the Stripe Customer in sync with cluster
+// state that isn't reflected on BillingAccount.spec:
+//
+//   - BillingAccountBinding — drives Customer.metadata.projects. A
+//     new Active binding or a binding transitioning out of Active
+//     needs to re-stamp the projects list on Stripe; without this
+//     watch the list goes stale until the BA itself happens to be
+//     edited.
+//   - StripePaymentMethod — drives the default payment-method ID
+//     mirrored onto Customer.invoice_settings.default_payment_method.
+//     The pm_… ID lands on status.stripePaymentMethodId after the
+//     SetupIntent confirms; without this watch a default chosen
+//     before confirmation never propagates upstream.
+//
+// Both map their observed objects back to the parent BillingAccount
+// and enqueue a reconcile against it.
 func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	r.Scheme = mgr.GetScheme()
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("billingaccount").
 		For(&billingv1alpha1.BillingAccount{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&billingv1alpha1.BillingAccountBinding{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueBillingAccountForBinding),
+		).
+		Watches(
+			&stripev1alpha1.StripePaymentMethod{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueBillingAccountForStripePaymentMethod),
+		).
 		Complete(r)
+}
+
+// enqueueBillingAccountForBinding maps a BillingAccountBinding event
+// to a reconcile request for the BillingAccount the binding references.
+// Same namespace by construction (BAB lives in the org namespace
+// alongside the BA).
+func (r *BillingAccountReconciler) enqueueBillingAccountForBinding(_ context.Context, obj client.Object) []reconcile.Request {
+	bab, ok := obj.(*billingv1alpha1.BillingAccountBinding)
+	if !ok {
+		return nil
+	}
+	if bab.Spec.BillingAccountRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: bab.Namespace,
+			Name:      bab.Spec.BillingAccountRef.Name,
+		},
+	}}
+}
+
+// enqueueBillingAccountForStripePaymentMethod maps a StripePaymentMethod
+// event to a reconcile request for the BillingAccount that owns its
+// parent PaymentMethod. The SPM's name matches its parent PM's name
+// (paymentmethod-watcher invariant) so we can look the PM up directly
+// without an extra owner-ref walk.
+func (r *BillingAccountReconciler) enqueueBillingAccountForStripePaymentMethod(ctx context.Context, obj client.Object) []reconcile.Request {
+	spm, ok := obj.(*stripev1alpha1.StripePaymentMethod)
+	if !ok {
+		return nil
+	}
+	pmName := spm.Spec.PaymentMethodRef.Name
+	if pmName == "" {
+		return nil
+	}
+	var pm billingv1alpha1.PaymentMethod
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: spm.Namespace, Name: pmName}, &pm); err != nil {
+		// PaymentMethod gone (deleted out from under) or transient API
+		// error — drop the event rather than enqueue a request the BA
+		// reconciler can't satisfy. The next BA generation bump will
+		// re-resolve everything anyway.
+		return nil
+	}
+	if pm.Spec.BillingAccountRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: pm.Namespace,
+			Name:      pm.Spec.BillingAccountRef.Name,
+		},
+	}}
 }
