@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: stripe-provider
+    app.kubernetes.io/name: stripe-provider
+    app.kubernetes.io/managed-by: kustomize
+  name: stripe-provider-metrics
+spec:
+  endpoints:
+    - path: /metrics
+      port: metrics
+      scheme: http
+  selector:
+    matchLabels:
+      control-plane: stripe-provider
+      app.kubernetes.io/name: stripe-provider
