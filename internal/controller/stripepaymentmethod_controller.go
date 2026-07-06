@@ -280,6 +280,21 @@ func (r *StripePaymentMethodReconciler) setupIntentExpired(si *stripev1alpha1.St
 	return time.Now().After(si.ExpiresAt.Time)
 }
 
+// setupIntentNeedsCancel reports whether an upstream SetupIntent is
+// still in a cancellable state. Succeeded intents should be detached,
+// not canceled.
+func setupIntentNeedsCancel(si *stripev1alpha1.StripeSetupIntentStatus) bool {
+	if si == nil || si.ID == "" {
+		return false
+	}
+	switch si.Status {
+	case "succeeded", "canceled":
+		return false
+	default:
+		return true
+	}
+}
+
 func (r *StripePaymentMethodReconciler) requeueUntilExpiry(si *stripev1alpha1.StripeSetupIntentStatus) time.Duration {
 	if si == nil || si.ExpiresAt == nil {
 		return defaultSetupIntentTTL
@@ -309,9 +324,10 @@ func (r *StripePaymentMethodReconciler) reconcileDelete(ctx context.Context, spm
 		detachErr = fmt.Errorf("resolving StripeProviderConfig: %w", cfgErr)
 	} else {
 		stripe := stripeinternal.NewClient(cfg)
-		// Cancel any in-flight SetupIntent first; benign if already
-		// terminal upstream.
-		if spm.Status.SetupIntent != nil {
+		// Cancel in-flight SetupIntents only while still cancellable.
+		// Succeeded intents already have a confirmed payment method to
+		// detach; canceling them just spams Stripe with 400s.
+		if spm.Status.SetupIntent != nil && setupIntentNeedsCancel(spm.Status.SetupIntent) {
 			if err := stripe.CancelSetupIntent(ctx, spm.Status.SetupIntent.ID); err != nil {
 				detachErr = err
 			}

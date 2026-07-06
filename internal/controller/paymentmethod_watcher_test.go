@@ -3,9 +3,12 @@
 package controller
 
 import (
+	"errors"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
@@ -99,5 +102,19 @@ var _ = Describe("PaymentMethodWatcher", func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: pm.Namespace, Name: pm.Name}, &child)
 			g.Expect(err).To(HaveOccurred(), "expected no StripePaymentMethod to exist")
 		}, 2*time.Second, 250*time.Millisecond).Should(Succeed())
+	})
+
+	It("treats a terminating namespace forbidden error as non-retryable", func() {
+		err := apierrors.NewForbidden(
+			schema.GroupResource{Group: "stripe.billing.miloapis.com", Resource: "stripepaymentmethods"},
+			"pm-1",
+			errors.New("unable to create new content in namespace organization-org-foo because it is being terminated"),
+		)
+		Expect(isNamespaceTerminatingForbidden(err)).To(BeTrue())
+		Expect(isNamespaceTerminatingForbidden(apierrors.NewForbidden(
+			schema.GroupResource{Group: "stripe.billing.miloapis.com", Resource: "stripepaymentmethods"},
+			"pm-1",
+			errors.New("paymentmethods.stripe.billing.miloapis.com is forbidden"),
+		))).To(BeFalse())
 	})
 })

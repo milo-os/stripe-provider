@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -97,11 +98,26 @@ func (r *PaymentMethodWatcher) Reconcile(ctx context.Context, req reconcile.Requ
 		if apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, nil
 		}
+		if isNamespaceTerminatingForbidden(err) {
+			logger.V(1).Info("skipping StripePaymentMethod create; namespace terminating",
+				"namespace", pm.Namespace, "paymentMethod", pm.Name)
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("creating StripePaymentMethod %s/%s: %w", child.Namespace, child.Name, err)
 	}
 	logger.Info("created StripePaymentMethod for PaymentMethod",
 		"namespace", pm.Namespace, "paymentMethod", pm.Name, "class", pmc.Name)
 	return ctrl.Result{}, nil
+}
+
+// isNamespaceTerminatingForbidden reports whether err is the apiserver
+// refusing a create because the target namespace is being deleted.
+// This is expected during org teardown and should not be retried.
+func isNamespaceTerminatingForbidden(err error) bool {
+	if !apierrors.IsForbidden(err) {
+		return false
+	}
+	return strings.Contains(err.Error(), "being terminated")
 }
 
 // SetupWithManager wires the watcher.
