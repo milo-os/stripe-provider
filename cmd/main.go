@@ -7,13 +7,16 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -67,14 +70,18 @@ func main() {
 		webhookOpts.CertDir = webhookCertDir
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                  scheme,
-		Metrics:                 metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress:  probeAddr,
-		LeaderElection:          enableLeader,
-		LeaderElectionID:        "stripe.billing.miloapis.com",
-		LeaderElectionNamespace: leaderNS,
-		WebhookServer:           webhook.NewServer(webhookOpts),
+	cfg := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                        scheme,
+		Metrics:                       metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress:        probeAddr,
+		LeaderElection:                enableLeader,
+		LeaderElectionID:              "stripe.billing.miloapis.com",
+		LeaderElectionNamespace:       leaderNS,
+		LeaderElectionConfig:          leaderElectionRestConfig(cfg),
+		LeaderElectionReleaseOnCancel: true,
+		WebhookServer:                 webhook.NewServer(webhookOpts),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -121,4 +128,21 @@ func main() {
 		setupLog.Error(err, "manager exited")
 		os.Exit(1)
 	}
+}
+
+const (
+	leaderElectionQPS   = 5
+	leaderElectionBurst = 10
+)
+
+func leaderElectionRestConfig(base *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(base)
+	cfg.RateLimiter = nil
+	cfg.QPS = leaderElectionQPS
+	cfg.Burst = leaderElectionBurst
+	cfg.Dial = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	return cfg
 }
