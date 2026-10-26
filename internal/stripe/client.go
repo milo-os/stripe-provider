@@ -345,12 +345,10 @@ func (c *Client) CreateSetupIntent(ctx context.Context, customerID, stripePaymen
 		return nil, errors.New("CreateSetupIntent requires a customer id")
 	}
 	params := &stripego.SetupIntentParams{
-		Params: stripego.Params{
-			Context: ctx,
-			Metadata: map[string]string{
-				"stripe_payment_method_namespace": stripePaymentMethodNamespace,
-				"stripe_payment_method_name":      stripePaymentMethodName,
-			},
+		Params: stripego.Params{Context: ctx},
+		Metadata: map[string]string{
+			"stripe_payment_method_namespace": stripePaymentMethodNamespace,
+			"stripe_payment_method_name":      stripePaymentMethodName,
 		},
 		Customer:           stripego.String(customerID),
 		Usage:              stripego.String(string(stripego.SetupIntentUsageOffSession)),
