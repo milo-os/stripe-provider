@@ -4,3 +4,4 @@ kind: Kustomization
 resources:
   - bases/stripe.billing.miloapis.com_stripeproviderconfigs.yaml
   - bases/stripe.billing.miloapis.com_stripepaymentmethods.yaml
+  - bases/stripe.billing.miloapis.com_stripecustomers.yaml

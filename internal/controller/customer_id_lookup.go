@@ -143,15 +143,35 @@ func findExistingCustomerID(
 	namespace string,
 	billingAccountName string,
 ) (string, error) {
+	spms, err := accountStripePaymentMethods(ctx, c, namespace, billingAccountName)
+	if err != nil {
+		return "", err
+	}
+	for i := range spms {
+		if id := spms[i].Status.StripeCustomerID; id != "" {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+// accountStripePaymentMethods returns the StripePaymentMethods whose
+// parent PaymentMethod is bound to the named BillingAccount. A
+// StripePaymentMethod whose PaymentMethod is gone (or can't be read) is
+// skipped.
+func accountStripePaymentMethods(
+	ctx context.Context,
+	c client.Client,
+	namespace string,
+	billingAccountName string,
+) ([]stripev1alpha1.StripePaymentMethod, error) {
 	var list stripev1alpha1.StripePaymentMethodList
 	if err := c.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-		return "", fmt.Errorf("listing StripePaymentMethods in %q: %w", namespace, err)
+		return nil, fmt.Errorf("listing StripePaymentMethods in %q: %w", namespace, err)
 	}
+	var out []stripev1alpha1.StripePaymentMethod
 	for i := range list.Items {
 		spm := &list.Items[i]
-		if spm.Status.StripeCustomerID == "" {
-			continue
-		}
 		if spm.Spec.PaymentMethodRef.Name == "" {
 			continue
 		}
@@ -165,7 +185,7 @@ func findExistingCustomerID(
 		if pm.Spec.BillingAccountRef.Name != billingAccountName {
 			continue
 		}
-		return spm.Status.StripeCustomerID, nil
+		out = append(out, *spm)
 	}
-	return "", nil
+	return out, nil
 }

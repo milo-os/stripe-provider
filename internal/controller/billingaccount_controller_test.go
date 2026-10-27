@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -35,18 +36,18 @@ type fakeStripeEnsurer struct {
 }
 
 type ensureCustomerCall struct {
-	existingID         string
-	billingAccountName string
-	details            stripeinternal.CustomerDetails
+	existingID string
+	account    stripeinternal.BillingAccountKey
+	details    stripeinternal.CustomerDetails
 }
 
-func (f *fakeStripeEnsurer) EnsureCustomer(_ context.Context, existingID, billingAccountName string, details stripeinternal.CustomerDetails) (string, error) {
+func (f *fakeStripeEnsurer) EnsureCustomer(_ context.Context, existingID string, account stripeinternal.BillingAccountKey, details stripeinternal.CustomerDetails) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, ensureCustomerCall{
-		existingID:         existingID,
-		billingAccountName: billingAccountName,
-		details:            details,
+		existingID: existingID,
+		account:    account,
+		details:    details,
 	})
 	id := existingID
 	if f.stubID != "" {
@@ -64,7 +65,7 @@ func (f *fakeStripeEnsurer) Calls() []ensureCustomerCall {
 }
 
 var _ = Describe("BillingAccountReconciler", func() {
-	It("is a no-op when no StripePaymentMethod has recorded a customer ID for the BillingAccount", func() {
+	It("is a no-op when the BillingAccount has no payment method and isn't billed by invoice", func() {
 		ns := "default"
 		baName := "ba-noop"
 
@@ -91,7 +92,10 @@ var _ = Describe("BillingAccountReconciler", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.Calls()).To(BeEmpty(),
-			"reconcile must not call Stripe when no Customer has been created yet")
+			"reconcile must not create a Stripe Customer the account doesn't need")
+		var sc stripev1alpha1.StripeCustomer
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(ba), &sc))).To(BeTrue(),
+			"no StripeCustomer for an account that doesn't need one")
 	})
 
 	It("pushes the BillingAccount spec to Stripe when a sibling StripePaymentMethod has a customer ID", func() {
@@ -165,7 +169,7 @@ var _ = Describe("BillingAccountReconciler", func() {
 		call := fake.Calls()[0]
 		Expect(call.existingID).To(Equal("cus_sync_001"),
 			"must call EnsureCustomer with the existing customer ID, not empty")
-		Expect(call.billingAccountName).To(Equal(baName))
+		Expect(call.account).To(Equal(stripeinternal.BillingAccountKey{Namespace: ns, Name: baName, UID: string(ba.UID)}))
 		Expect(call.details.Name).To(Equal("Test Co."),
 			"BusinessName should win over Name when both are set, per customerDetailsFromBillingAccount")
 		Expect(call.details.Email).To(Equal("ar@example.com"),
@@ -173,6 +177,12 @@ var _ = Describe("BillingAccountReconciler", func() {
 		Expect(call.details.TaxIDs).To(HaveLen(1))
 		Expect(call.details.TaxIDs[0].Type).To(Equal("gb_vat"))
 		Expect(call.details.TaxIDs[0].Value).To(Equal("GB123456789"))
+
+		var sc stripev1alpha1.StripeCustomer
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ba), &sc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, &sc) })
+		Expect(sc.Status.StripeCustomerID).To(Equal("cus_sync_001"),
+			"an account with a card from before StripeCustomer existed publishes that card's customer")
 	})
 
 	It("propagates the BA's default PaymentMethod onto CustomerDetails", func() {

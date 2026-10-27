@@ -33,6 +33,27 @@ rules:
 - apiGroups:
   - stripe.billing.miloapis.com
   resources:
+  - stripecustomers
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
+  - stripecustomers/status
+  - stripepaymentmethods/status
+  - stripeproviderconfigs/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
   - stripepaymentmethods
   verbs:
   - create
@@ -47,15 +68,6 @@ rules:
   resources:
   - stripepaymentmethods/finalizers
   verbs:
-  - update
-- apiGroups:
-  - stripe.billing.miloapis.com
-  resources:
-  - stripepaymentmethods/status
-  - stripeproviderconfigs/status
-  verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - stripe.billing.miloapis.com

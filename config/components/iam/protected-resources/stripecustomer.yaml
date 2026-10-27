@@ -1,0 +1,28 @@
+# StripeCustomer publishes the Stripe customer for a BillingAccount,
+# owned by the stripe-provider controller. Surfacing it as a
+# ProtectedResource lets PolicyBindings grant staff read access when
+# tracing an account to its Stripe customer.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: stripe.billing.miloapis.com-stripecustomer
+spec:
+  serviceRef:
+    name: "stripe.billing.miloapis.com"
+  kind: StripeCustomer
+  plural: stripecustomers
+  singular: stripecustomer
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - patch
+    - delete
+    - watch
+  subresources:
+    - name: status
+      permissions:
+        - get
+        - update
+        - patch
