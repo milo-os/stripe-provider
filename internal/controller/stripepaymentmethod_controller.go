@@ -439,6 +439,7 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 	for _, t := range ba.Spec.TaxIDs {
 		d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
 	}
+	d.InvoiceFields = invoiceFields(ba)
 	// Organizations: today exactly one — the BA's owning org, which is
 	// also its Kubernetes namespace. milo is moving toward shared BAs
 	// across multiple orgs, at which point this mapper grows a lookup

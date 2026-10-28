@@ -240,6 +240,59 @@ func TestApplyCustomerDetails_StampsDefaultPaymentMethod(t *testing.T) {
 	})
 }
 
+// TestEnsureCustomer_UpdatePathSendsInvoiceFields confirms the invoice
+// fields reach invoice_settings[custom_fields], and that an empty list
+// is still sent, as the empty value that clears them.
+func TestEnsureCustomer_UpdatePathSendsInvoiceFields(t *testing.T) {
+	update := func(t *testing.T, fields []InvoiceField) string {
+		t.Helper()
+		var postBody atomic.Value
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/v1/customers/cus_terms"):
+				body, _ := io.ReadAll(r.Body)
+				postBody.Store(string(body))
+				_, _ = w.Write([]byte(`{"id":"cus_terms"}`))
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/tax_ids"):
+				_, _ = w.Write([]byte(`{"object":"list","data":[],"has_more":false,"url":"/v1/customers/cus_terms/tax_ids"}`))
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer srv.Close()
+		_, err := newClientForBackend(t, srv.URL).EnsureCustomer(context.Background(), "cus_terms",
+			BillingAccountKey{Name: "ba-terms"}, CustomerDetails{InvoiceFields: fields})
+		if err != nil {
+			t.Fatalf("EnsureCustomer update path: %v", err)
+		}
+		body, _ := postBody.Load().(string)
+		decoded, _ := url.QueryUnescape(body)
+		return decoded
+	}
+
+	t.Run("fields are sent in order", func(t *testing.T) {
+		body := update(t, []InvoiceField{{Name: "PO number", Value: "PO-4471"}, {Name: "Agreement", Value: "MSA-2026-014"}})
+		for _, want := range []string{
+			"invoice_settings[custom_fields][0][name]=PO number",
+			"invoice_settings[custom_fields][0][value]=PO-4471",
+			"invoice_settings[custom_fields][1][name]=Agreement",
+			"invoice_settings[custom_fields][1][value]=MSA-2026-014",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("update body missing %q\nbody: %s", want, body)
+			}
+		}
+	})
+
+	t.Run("no fields clears them", func(t *testing.T) {
+		body := update(t, nil)
+		if !strings.Contains(body, "invoice_settings[custom_fields]=&") && !strings.HasSuffix(body, "invoice_settings[custom_fields]=") {
+			t.Errorf("update body should clear invoice_settings[custom_fields]\nbody: %s", body)
+		}
+	})
+}
+
 // TestEnsureCustomer_UpdatePathSendsDefaultPaymentMethod confirms the
 // form-encoded body Stripe receives carries
 // invoice_settings[default_payment_method]= on the update path.

@@ -81,6 +81,18 @@ type CustomerDetails struct {
 	// Stripe metadata values cap at 500 chars per key; long lists are
 	// truncated by the caller before reaching the wire.
 	Projects []string
+	// InvoiceFields are printed on every invoice issued to the customer
+	// (Customer.invoice_settings.custom_fields), such as the PO number
+	// an account on payment terms gave. Always sent, so an empty list
+	// clears the fields once the terms end. Stripe allows at most 4,
+	// with names up to 40 and values up to 140 characters.
+	InvoiceFields []InvoiceField
+}
+
+// InvoiceField is one name/value pair printed on a customer's invoices.
+type InvoiceField struct {
+	Name  string
+	Value string
 }
 
 // CustomerAddress mirrors Stripe's address sub-object.
@@ -285,8 +297,19 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 	// nominates. Always set the field — sending an empty string
 	// clears the upstream default, which is what we want when the
 	// consumer clears defaultPaymentMethodRef on the BillingAccount.
+	//
+	// The invoice fields are always sent too: stripe-go encodes an empty,
+	// non-nil list as `custom_fields=`, which clears them.
+	fields := make([]*stripego.CustomerInvoiceSettingsCustomFieldParams, 0, len(d.InvoiceFields))
+	for _, f := range d.InvoiceFields {
+		fields = append(fields, &stripego.CustomerInvoiceSettingsCustomFieldParams{
+			Name:  stripego.String(f.Name),
+			Value: stripego.String(f.Value),
+		})
+	}
 	params.InvoiceSettings = &stripego.CustomerInvoiceSettingsParams{
 		DefaultPaymentMethod: stripego.String(d.DefaultPaymentMethodID),
+		CustomFields:         fields,
 	}
 }
 

@@ -37,7 +37,9 @@ in the billing repo for the full design.
   `StripeCustomer`, once the account has a payment method or billing
   reports it is billed by invoice (`status.paymentArrangement`). Both
   controllers create customers through one shared, per-account lock, so
-  an account never gets two.
+  an account never gets two. While the account is on payment terms, the
+  terms' PO number and agreement reference are printed on every invoice
+  (`invoice_settings.custom_fields`).
 - **Webhook server** — receives Stripe `setup_intent.*` events on
   `POST /webhooks/stripe`. Signature-verified via the per-class webhook
   secret stored in the `Secret` referenced by `StripeProviderConfig`.
