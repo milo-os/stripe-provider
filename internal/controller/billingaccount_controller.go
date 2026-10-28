@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -164,6 +165,27 @@ func hasInvoiceArrangement(ba *billingv1alpha1.BillingAccount) bool {
 	return arr != nil && arr.Type == billingv1alpha1.BillingArrangementTypeInvoice
 }
 
+// invoiceFields are the payment terms' references printed on every
+// invoice, so the customer's accounts payable team can match it to their
+// purchase order and agreement. Only while the terms are in effect:
+// billing clears status.paymentArrangement when they end, and the
+// fields are cleared from Stripe with it. billing caps both values well
+// under Stripe's 140 characters.
+func invoiceFields(ba *billingv1alpha1.BillingAccount) []stripeinternal.InvoiceField {
+	if !hasInvoiceArrangement(ba) || ba.Status.PaymentArrangement.Invoice == nil {
+		return nil
+	}
+	terms := ba.Status.PaymentArrangement.Invoice
+	var fields []stripeinternal.InvoiceField
+	if terms.PurchaseOrderNumber != "" {
+		fields = append(fields, stripeinternal.InvoiceField{Name: "PO number", Value: terms.PurchaseOrderNumber})
+	}
+	if terms.AgreementReference != "" {
+		fields = append(fields, stripeinternal.InvoiceField{Name: "Agreement", Value: terms.AgreementReference})
+	}
+	return fields
+}
+
 func (r *BillingAccountReconciler) customers() *StripeCustomers {
 	if r.Customers == nil {
 		r.Customers = NewStripeCustomers(r.Client, r.Client)
@@ -241,14 +263,16 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // invoiceArrangementChanged passes BillingAccount updates that start or
-// end billing by invoice. billing reports that on status, which doesn't
-// change the generation, and an account that starts paying by invoice
-// needs a Stripe Customer.
+// end billing by invoice, or change the references printed on its
+// invoices. billing reports both on status, which doesn't change the
+// generation: an account that starts paying by invoice needs a Stripe
+// Customer, and that customer's invoice fields follow the terms.
 var invoiceArrangementChanged = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		oldBA, okOld := e.ObjectOld.(*billingv1alpha1.BillingAccount)
 		newBA, okNew := e.ObjectNew.(*billingv1alpha1.BillingAccount)
-		return okOld && okNew && hasInvoiceArrangement(oldBA) != hasInvoiceArrangement(newBA)
+		return okOld && okNew && (hasInvoiceArrangement(oldBA) != hasInvoiceArrangement(newBA) ||
+			!slices.Equal(invoiceFields(oldBA), invoiceFields(newBA)))
 	},
 }
 

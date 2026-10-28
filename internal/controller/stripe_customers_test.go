@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
@@ -137,6 +138,47 @@ var _ = Describe("StripeCustomer", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.Calls()).To(HaveLen(2), "an account with a StripeCustomer keeps syncing its customer")
 		Expect(fake.Calls()[1].existingID).To(Equal("cus_terms"))
+	})
+
+	It("prints the payment terms' PO number and agreement on invoices while they're in effect", func() {
+		ba := invoiceBilledAccount("ba-invoice-fields")
+		ba.Status.PaymentArrangement.Invoice.PurchaseOrderNumber = "PO-4471"
+		ba.Status.PaymentArrangement.Invoice.AgreementReference = "MSA-2026-014"
+		Expect(k8sClient.Status().Update(ctx, ba)).To(Succeed())
+		fake := &fakeStripeEnsurer{stubID: "cus_fields"}
+		r := reconcilerWith(fake)
+		req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)}
+
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, getStripeCustomer(ba)) })
+		Expect(fake.Calls()[0].details.InvoiceFields).To(Equal([]stripeinternal.InvoiceField{
+			{Name: "PO number", Value: "PO-4471"},
+			{Name: "Agreement", Value: "MSA-2026-014"},
+		}))
+
+		ba.Status.PaymentArrangement = nil
+		Expect(k8sClient.Status().Update(ctx, ba)).To(Succeed())
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.Calls()[1].details.InvoiceFields).To(BeEmpty(), "the fields are cleared once the terms end")
+	})
+
+	It("resyncs the customer when the references on the terms change", func() {
+		before := &billingv1alpha1.BillingAccount{Status: billingv1alpha1.BillingAccountStatus{
+			PaymentArrangement: &billingv1alpha1.BillingAccountPaymentArrangement{
+				Name: "terms", Type: billingv1alpha1.BillingArrangementTypeInvoice,
+				Invoice: &billingv1alpha1.InvoiceArrangementTerms{NetDays: 30, PurchaseOrderNumber: "PO-1"},
+			},
+		}}
+		poChanged := before.DeepCopy()
+		poChanged.Status.PaymentArrangement.Invoice.PurchaseOrderNumber = "PO-2"
+		netDaysChanged := before.DeepCopy()
+		netDaysChanged.Status.PaymentArrangement.Invoice.NetDays = 45
+
+		Expect(invoiceArrangementChanged.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: poChanged})).To(BeTrue())
+		Expect(invoiceArrangementChanged.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: netDaysChanged})).To(BeFalse(),
+			"net days don't reach the Stripe customer")
 	})
 
 	It("records a tax ID Stripe rejected without failing the customer", func() {
