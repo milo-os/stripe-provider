@@ -1,0 +1,16 @@
+# Read-only role over StripeCustomer, for looking up the Stripe
+# customer that bills a BillingAccount. Writes are reserved for the
+# stripe-provider controller.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: stripe.billing.miloapis.com-stripe-customer-viewer
+  annotations:
+    kubernetes.io/display-name: Stripe Customer Viewer
+    kubernetes.io/description: "Read-only access to StripeCustomer resources"
+spec:
+  launchStage: Alpha
+  includedPermissions:
+    - stripe.billing.miloapis.com/stripecustomers.list
+    - stripe.billing.miloapis.com/stripecustomers.get
+    - stripe.billing.miloapis.com/stripecustomers.watch

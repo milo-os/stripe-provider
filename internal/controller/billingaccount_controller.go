@@ -13,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -24,22 +25,19 @@ import (
 )
 
 // BillingAccountReconciler keeps the Stripe Customer record in sync with
-// the owning BillingAccount's spec. The StripePaymentMethod reconciler
-// stamps Customer details on initial creation, but never re-runs against
-// the same Customer when the BillingAccount changes later — so edits to
-// `spec.contactInfo` (tax IDs, address, business name, invoice
-// recipients) never propagate to Stripe.
+// the owning BillingAccount's spec, and creates it for accounts billed by
+// invoice. The StripePaymentMethod reconciler creates the Customer when a
+// card is added, but never re-runs against the same Customer when the
+// BillingAccount changes later — so edits to `spec.contactInfo` (tax
+// IDs, address, business name, invoice recipients) would otherwise never
+// propagate to Stripe.
 //
-// This reconciler watches BillingAccount, finds the Stripe Customer ID
-// previously associated with the account (via the same dedup lookup the
-// StripePaymentMethod reconciler uses), and re-runs EnsureCustomer with
-// the current spec to push the latest values up.
-//
-// When the BillingAccount has no Stripe Customer yet (i.e. no
-// StripePaymentMethod has reached AwaitingConfirmation) the reconciler
-// is a no-op: there is nothing to update yet, and the
-// StripePaymentMethod reconciler will pick up the freshest details from
-// the BillingAccount the next time a PaymentMethod is created.
+// An account needs a Stripe Customer once it has a StripePaymentMethod,
+// or once billing reports it is billed by invoice (an Invoice
+// BillingArrangement on status.paymentArrangement): invoicing providers
+// bill the Customer published on its StripeCustomer, and an account with
+// payment terms need never add a card. Accounts that need neither are a
+// no-op, so abandoned sign-ups don't become Stripe Customers.
 type BillingAccountReconciler struct {
 	Client client.Client
 	Scheme *runtime.Scheme
@@ -48,6 +46,12 @@ type BillingAccountReconciler struct {
 	// uses for SDK credentials. Set from the operator flag, same value
 	// the StripePaymentMethodReconciler uses.
 	ProviderConfigName string
+
+	// Customers creates and syncs the account's Stripe Customer. Shared
+	// with the StripePaymentMethodReconciler so the two can't create a
+	// Customer each for the same account. SetupWithManager creates one
+	// when unset.
+	Customers *StripeCustomers
 
 	// stripeClientFactory builds the Stripe SDK wrapper from a resolved
 	// config. Indirection exists so unit tests can substitute a stub
@@ -62,12 +66,14 @@ type BillingAccountReconciler struct {
 // stripeinternal.Client) so tests can swap it out without exporting
 // extra surface from the stripe package.
 type stripeCustomerEnsurer interface {
-	EnsureCustomer(ctx context.Context, existingID, billingAccountName string, details stripeinternal.CustomerDetails) (string, error)
+	EnsureCustomer(ctx context.Context, existingID string, account stripeinternal.BillingAccountKey, details stripeinternal.CustomerDetails) (string, error)
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=paymentmethods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripepaymentmethods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
@@ -83,22 +89,18 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	}
 
 	if !ba.DeletionTimestamp.IsZero() {
-		// Deletion of the Stripe Customer is the StripePaymentMethod
-		// reconciler's responsibility (it owns the cleanup finalizer).
-		// Nothing to do here.
+		// The Stripe Customer outlives the account: it holds the
+		// invoice history. The StripeCustomer is garbage collected with
+		// the account. Nothing to do here.
 		return ctrl.Result{}, nil
 	}
 
-	// Locate the Stripe Customer ID previously stamped onto a sibling
-	// StripePaymentMethod for this BillingAccount. If none exists the
-	// account has no Stripe-side presence yet; bail until a
-	// PaymentMethod is created.
-	customerID, err := findExistingCustomerID(ctx, r.Client, ba.Namespace, ba.Name)
+	needed, err := r.needsStripeCustomer(ctx, &ba)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("looking up existing Stripe customer: %w", err)
+		return ctrl.Result{}, err
 	}
-	if customerID == "" {
-		logger.V(2).Info("no Stripe Customer recorded for BillingAccount yet; skipping push",
+	if !needed {
+		logger.V(2).Info("BillingAccount has no payment method and isn't billed by invoice; no Stripe Customer needed",
 			"billingAccount", ba.Name)
 		return ctrl.Result{}, nil
 	}
@@ -107,27 +109,61 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	details, err := buildCustomerDetails(ctx, r.Client, &ba)
+	customerID, err := r.customers().Ensure(ctx, stripe, &ba)
 	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if _, err := stripe.EnsureCustomer(ctx, customerID, ba.Name, details); err != nil {
 		// Tax-ID rejection means the rest of the Customer record did
 		// sync; we'd just loop forever fighting a bad user-supplied
-		// value if we returned an error. The StripePaymentMethod
-		// reconciler is the surface where the user sees the tax-ID
-		// failure condition, so log here and move on.
+		// value if we returned an error. The StripeCustomer's
+		// TaxIDsApplied condition records the failure.
 		var taxErr *stripeinternal.TaxIDError
 		if errors.As(err, &taxErr) {
 			logger.Info("BillingAccount sync hit a tax-ID failure on Stripe; rest of customer synced",
 				"customerID", customerID, "billingAccount", ba.Name, "error", taxErr.Underlying)
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("syncing Stripe customer %q from BillingAccount: %w", customerID, err)
+		return ctrl.Result{}, fmt.Errorf("syncing Stripe customer from BillingAccount %q: %w", ba.Name, err)
 	}
 	logger.V(1).Info("synced Stripe Customer from BillingAccount",
 		"customerID", customerID, "billingAccount", ba.Name)
 	return ctrl.Result{}, nil
+}
+
+// needsStripeCustomer reports whether the account should have a Stripe
+// Customer: it already has one (a StripeCustomer, or a
+// StripePaymentMethod from before StripeCustomer existed), a payment
+// method is being added, or it is billed by invoice.
+func (r *BillingAccountReconciler) needsStripeCustomer(ctx context.Context, ba *billingv1alpha1.BillingAccount) (bool, error) {
+	if hasInvoiceArrangement(ba) {
+		return true, nil
+	}
+	var sc stripev1alpha1.StripeCustomer
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ba.Namespace, Name: ba.Name}, &sc)
+	if err == nil {
+		return true, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("getting StripeCustomer %q: %w", ba.Name, err)
+	}
+	spms, err := accountStripePaymentMethods(ctx, r.Client, ba.Namespace, ba.Name)
+	if err != nil {
+		return false, fmt.Errorf("listing StripePaymentMethods for BillingAccount %q: %w", ba.Name, err)
+	}
+	return len(spms) > 0, nil
+}
+
+// hasInvoiceArrangement reports whether billing bills the account by
+// invoice: it publishes the active BillingArrangement on
+// status.paymentArrangement and clears it when none is active.
+func hasInvoiceArrangement(ba *billingv1alpha1.BillingAccount) bool {
+	arr := ba.Status.PaymentArrangement
+	return arr != nil && arr.Type == billingv1alpha1.BillingArrangementTypeInvoice
+}
+
+func (r *BillingAccountReconciler) customers() *StripeCustomers {
+	if r.Customers == nil {
+		r.Customers = NewStripeCustomers(r.Client, r.Client)
+	}
+	return r.Customers
 }
 
 // buildStripeClient resolves the StripeProviderConfig and constructs
@@ -148,15 +184,15 @@ func (r *BillingAccountReconciler) buildStripeClient(ctx context.Context) (strip
 
 // SetupWithManager wires the reconciler.
 //
-// The GenerationChangedPredicate filter restricts BillingAccount Update
-// events to those that bump metadata.generation, which Kubernetes
-// increments only when .spec changes. Without it the reconciler would
-// fire on every status write from the billing controller, every
-// finalizer add, and every label/annotation tweak — each one trailing
-// a Stripe Customers.Update + TaxIDs reconcile loop. Create and Delete
-// events still pass the predicate.
+// The BillingAccount predicate restricts Update events to those that
+// bump metadata.generation, which Kubernetes increments only when .spec
+// changes, or that start or end billing by invoice. Without it the
+// reconciler would fire on every status write from the billing
+// controller, every finalizer add, and every label/annotation tweak —
+// each one trailing a Stripe Customers.Update + TaxIDs reconcile loop.
+// Create and Delete events still pass the predicate.
 //
-// Two secondary watches keep the Stripe Customer in sync with cluster
+// Three secondary watches keep the Stripe Customer in sync with cluster
 // state that isn't reflected on BillingAccount.spec:
 //
 //   - BillingAccountBinding — drives Customer.metadata.projects. A
@@ -169,15 +205,25 @@ func (r *BillingAccountReconciler) buildStripeClient(ctx context.Context) (strip
 //     The pm_… ID lands on status.stripePaymentMethodId after the
 //     SetupIntent confirms; without this watch a default chosen
 //     before confirmation never propagates upstream.
+//   - StripeCustomer — recreates one that was deleted while its
+//     account still needs it. Status writes don't change its
+//     generation, so the reconciler's own writes don't requeue it.
 //
-// Both map their observed objects back to the parent BillingAccount
-// and enqueue a reconcile against it.
+// The first two map their observed objects back to the parent
+// BillingAccount and enqueue a reconcile against it.
 func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	r.Scheme = mgr.GetScheme()
+	if r.Customers == nil {
+		r.Customers = NewStripeCustomers(mgr.GetClient(), mgr.GetAPIReader())
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("billingaccount").
-		For(&billingv1alpha1.BillingAccount{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&billingv1alpha1.BillingAccount{}, builder.WithPredicates(predicate.Or(
+			predicate.GenerationChangedPredicate{},
+			invoiceArrangementChanged,
+		))).
+		Owns(&stripev1alpha1.StripeCustomer{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
 			&billingv1alpha1.BillingAccountBinding{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueBillingAccountForBinding),
@@ -187,6 +233,18 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.enqueueBillingAccountForStripePaymentMethod),
 		).
 		Complete(r)
+}
+
+// invoiceArrangementChanged passes BillingAccount updates that start or
+// end billing by invoice. billing reports that on status, which doesn't
+// change the generation, and an account that starts paying by invoice
+// needs a Stripe Customer.
+var invoiceArrangementChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldBA, okOld := e.ObjectOld.(*billingv1alpha1.BillingAccount)
+		newBA, okNew := e.ObjectNew.(*billingv1alpha1.BillingAccount)
+		return okOld && okNew && hasInvoiceArrangement(oldBA) != hasInvoiceArrangement(newBA)
+	},
 }
 
 // enqueueBillingAccountForBinding maps a BillingAccountBinding event

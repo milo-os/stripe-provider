@@ -80,12 +80,19 @@ type StripePaymentMethodReconciler struct {
 	// SetupIntentTTL overrides defaultSetupIntentTTL. Zero means use
 	// the default.
 	SetupIntentTTL time.Duration
+
+	// Customers creates and syncs the account's Stripe Customer. Shared
+	// with the BillingAccountReconciler; SetupWithManager creates one
+	// when unset.
+	Customers *StripeCustomers
 }
 
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripepaymentmethods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripepaymentmethods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripepaymentmethods/finalizers,verbs=update
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeproviderconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=paymentmethods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=paymentmethods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
@@ -170,39 +177,17 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 	}
 	stripe := stripeinternal.NewClient(cfg)
 
-	// Deduplicate Stripe Customers across the BillingAccount. The
-	// StripePaymentMethod's own status is authoritative when set;
-	// otherwise look at sibling StripePaymentMethods in the same
-	// namespace for a Customer ID we've already attached to this BA.
-	// Without this, every PaymentMethod the user adds creates a fresh
-	// Customer in Stripe — see findExistingCustomerID for the lookup
-	// shape and internal/stripe/client.go for the metadata-search
-	// fallback used inside EnsureCustomer.
-	existingID := spm.Status.StripeCustomerID
-	if existingID == "" {
-		found, lookupErr := findExistingCustomerID(ctx, r.Client, spm.Namespace, ba.Name)
-		if lookupErr != nil {
-			return ctrl.Result{}, fmt.Errorf("looking up existing Stripe customer for BillingAccount %q: %w", ba.Name, lookupErr)
-		}
-		if found != "" {
-			logger.V(1).Info("reusing Stripe Customer from sibling StripePaymentMethod",
-				"customerID", found, "billingAccount", ba.Name)
-			existingID = found
-		}
-	}
-
-	details, err := buildCustomerDetails(ctx, r.Client, &ba)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	customerID, err := stripe.EnsureCustomer(ctx, existingID, ba.Name, details)
+	// The account has one Stripe Customer, shared by all its payment
+	// methods and published on its StripeCustomer. Ensure finds it (or
+	// creates it) under a lock shared with the BillingAccountReconciler,
+	// so adding a card and starting payment terms at the same time can't
+	// create two.
+	customerID, err := r.customers().Ensure(ctx, stripe, &ba)
 	// A TaxIDError means the Customer record itself succeeded but the
 	// tax_ids reconcile against it failed (e.g. user-supplied tax ID
 	// rejected by Stripe). The Customer ID is still authoritative and
-	// must be used downstream — failing the whole reconcile would
-	// (a) spin retries that each create a new Customer record because
-	// Stripe Search has read-after-write lag, and (b) block the
-	// SetupIntent the portal is waiting on. Surface the failure via a
+	// must be used downstream — failing the whole reconcile would block
+	// the SetupIntent the portal is waiting on. Surface the failure via a
 	// condition instead and proceed.
 	var taxErr *stripeinternal.TaxIDError
 	if errors.As(err, &taxErr) {
@@ -492,10 +477,20 @@ func (r *StripePaymentMethodReconciler) ensurePaymentMethodAwaiting(ctx context.
 	return r.Client.Status().Patch(ctx, &pm, client.MergeFrom(base))
 }
 
+func (r *StripePaymentMethodReconciler) customers() *StripeCustomers {
+	if r.Customers == nil {
+		r.Customers = NewStripeCustomers(r.Client, r.Client)
+	}
+	return r.Customers
+}
+
 // SetupWithManager wires the reconciler.
 func (r *StripePaymentMethodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	r.Scheme = mgr.GetScheme()
+	if r.Customers == nil {
+		r.Customers = NewStripeCustomers(mgr.GetClient(), mgr.GetAPIReader())
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("stripepaymentmethod").
 		For(&stripev1alpha1.StripePaymentMethod{}).

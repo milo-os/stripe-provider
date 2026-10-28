@@ -109,7 +109,7 @@ func TestEnsureCustomer_UpdatePathSendsMetadata(t *testing.T) {
 	defer srv.Close()
 	c := newClientForBackend(t, srv.URL)
 
-	_, err := c.EnsureCustomer(context.Background(), "cus_existing", "ba-existing", CustomerDetails{
+	_, err := c.EnsureCustomer(context.Background(), "cus_existing", BillingAccountKey{Name: "ba-existing"}, CustomerDetails{
 		Name:           "Acme Ltd",
 		BusinessName:   "Acme Ltd",
 		IndividualName: "Matt Jenkinson",
@@ -261,7 +261,7 @@ func TestEnsureCustomer_UpdatePathSendsDefaultPaymentMethod(t *testing.T) {
 	defer srv.Close()
 	c := newClientForBackend(t, srv.URL)
 
-	_, err := c.EnsureCustomer(context.Background(), "cus_default", "ba-default", CustomerDetails{
+	_, err := c.EnsureCustomer(context.Background(), "cus_default", BillingAccountKey{Name: "ba-default"}, CustomerDetails{
 		DefaultPaymentMethodID: "pm_9XyZAbcDef",
 	})
 	if err != nil {

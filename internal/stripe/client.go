@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	stripego "github.com/stripe/stripe-go/v81"
@@ -97,30 +99,39 @@ type TaxIDDetails struct {
 	Value string
 }
 
+// BillingAccountKey identifies the BillingAccount a Stripe Customer
+// belongs to. Name alone is only unique within a namespace, so the
+// namespace and UID are stamped on Customer.metadata too, and the UID is
+// what a customer search matches on.
+type BillingAccountKey struct {
+	Namespace string
+	Name      string
+	UID       string
+}
+
 // EnsureCustomer creates or updates a Stripe Customer for the supplied
 // billing account. When existingID is empty the caller is asking us to
 // either find or create the matching Customer. Before creating we ask
-// Stripe whether a Customer tagged with `metadata.billing_account =
-// <name>` already exists, so a controller restart that lost local
-// status (or a freshly-rebuilt cluster) doesn't mint duplicate
-// Customers. Returns the canonical `cus_…` identifier in all cases.
-func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountName string, details CustomerDetails) (string, error) {
-	if existingID == "" && billingAccountName != "" {
-		found, err := c.findCustomerByBillingAccount(ctx, billingAccountName)
+// Stripe whether a Customer tagged with the account already exists, so a
+// controller restart that lost local status (or a freshly-rebuilt
+// cluster) doesn't mint duplicate Customers. Returns the canonical
+// `cus_…` identifier in all cases.
+func (c *Client) EnsureCustomer(ctx context.Context, existingID string, account BillingAccountKey, details CustomerDetails) (string, error) {
+	if existingID == "" && account.Name != "" {
+		found, err := c.findCustomerByBillingAccount(ctx, account)
 		if err != nil {
-			return "", fmt.Errorf("searching Stripe customer for BillingAccount %q: %w", billingAccountName, err)
+			return "", fmt.Errorf("searching Stripe customer for BillingAccount %q: %w", account.Name, err)
 		}
 		existingID = found
 	}
 
+	params := &stripego.CustomerParams{
+		Params:   stripego.Params{Context: ctx},
+		Metadata: billingAccountMetadata(account),
+	}
+	applyCustomerDetails(params, details)
+
 	if existingID == "" {
-		params := &stripego.CustomerParams{
-			Params: stripego.Params{Context: ctx},
-			Metadata: map[string]string{
-				"billing_account": billingAccountName,
-			},
-		}
-		applyCustomerDetails(params, details)
 		cu, err := c.api.Customers.New(params)
 		if err != nil {
 			return "", fmt.Errorf("creating Stripe customer: %w", err)
@@ -133,10 +144,6 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountN
 		return cu.ID, nil
 	}
 
-	params := &stripego.CustomerParams{
-		Params: stripego.Params{Context: ctx},
-	}
-	applyCustomerDetails(params, details)
 	if _, err := c.api.Customers.Update(existingID, params); err != nil {
 		return existingID, fmt.Errorf("updating Stripe customer %q: %w", existingID, err)
 	}
@@ -146,30 +153,77 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID, billingAccountN
 	return existingID, nil
 }
 
+// billingAccountMetadata is the Customer.metadata that ties a Stripe
+// Customer to its BillingAccount. It is stamped on create and on every
+// update, so customers created before the namespace and UID keys existed
+// pick them up on their next sync. Empty values are left out: on an
+// update an empty value would delete the key.
+func billingAccountMetadata(account BillingAccountKey) map[string]string {
+	md := map[string]string{}
+	for k, v := range map[string]string{
+		"billing_account":           account.Name,
+		"billing_account_namespace": account.Namespace,
+		"billing_account_uid":       account.UID,
+	} {
+		if v != "" {
+			md[k] = v
+		}
+	}
+	return md
+}
+
 // findCustomerByBillingAccount queries Stripe's customer search for the
-// first Customer carrying `metadata.billing_account = name`. Returns
-// "" when no match exists. Errors are surfaced to the caller so the
-// reconciler can requeue rather than silently fall back to creating a
-// duplicate; transient search outages are loud rather than corrupting
-// state.
+// Customer tagged with the account's UID. Customers created before the
+// UID was stamped only carry `metadata.billing_account = name`, which can
+// repeat across namespaces, so those only match when their organizations
+// metadata names the account's namespace (the reconciler stamps the
+// owning namespace there). Returns "" when no match exists. Errors are
+// surfaced to the caller so the reconciler can requeue rather than
+// silently fall back to creating a duplicate; transient search outages
+// are loud rather than corrupting state.
 //
 // Stripe customer search is eventually consistent (typically <1s after a
 // create), so a tight create/lookup cycle on a fresh BillingAccount may
-// still produce a duplicate. The local-state lookup
-// (findExistingCustomerID in the controller package) catches the common
-// case; this exists for cold-start recovery scenarios where local
-// status was lost.
-func (c *Client) findCustomerByBillingAccount(ctx context.Context, billingAccountName string) (string, error) {
+// still produce a duplicate. The StripeCustomer resource (and the
+// per-account lock in the controller package) catches the common case;
+// this exists for cold-start recovery scenarios where local status was
+// lost.
+func (c *Client) findCustomerByBillingAccount(ctx context.Context, account BillingAccountKey) (string, error) {
+	if account.UID != "" {
+		id, err := c.searchCustomer(ctx,
+			fmt.Sprintf("metadata['billing_account_uid']:'%s'", escapeSearchQueryValue(account.UID)),
+			func(*stripego.Customer) bool { return true })
+		if err != nil || id != "" {
+			return id, err
+		}
+	}
+	return c.searchCustomer(ctx,
+		fmt.Sprintf("metadata['billing_account']:'%s'", escapeSearchQueryValue(account.Name)),
+		func(cu *stripego.Customer) bool {
+			if uid := cu.Metadata["billing_account_uid"]; uid != "" {
+				return uid == account.UID
+			}
+			return slices.ContainsFunc(strings.Split(cu.Metadata["organizations"], ","), func(org string) bool {
+				return strings.TrimSpace(org) == account.Namespace
+			})
+		})
+}
+
+// searchCustomer returns the first Customer matching query that match
+// also accepts, or "".
+func (c *Client) searchCustomer(ctx context.Context, query string, match func(*stripego.Customer) bool) (string, error) {
 	params := &stripego.CustomerSearchParams{
 		SearchParams: stripego.SearchParams{
 			Context: ctx,
-			Query:   fmt.Sprintf("metadata['billing_account']:'%s'", escapeSearchQueryValue(billingAccountName)),
-			Limit:   stripego.Int64(1),
+			Query:   query,
+			Limit:   stripego.Int64(10),
 		},
 	}
 	iter := c.api.Customers.Search(params)
-	if iter.Next() {
-		return iter.Customer().ID, nil
+	for iter.Next() {
+		if cu := iter.Customer(); match(cu) {
+			return cu.ID, nil
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return "", err
@@ -212,8 +266,8 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 	// empty — sending an empty value clears the key per Stripe's
 	// metadata merge semantics, which is the right behaviour when a
 	// user removes the value from the BillingAccount. Preserve any
-	// keys the caller set before us (Customer.New uses metadata to
-	// record `billing_account` for dedup).
+	// keys the caller set before us (EnsureCustomer uses metadata to
+	// record the billing account for dedup).
 	if params.Metadata == nil {
 		params.Metadata = map[string]string{}
 	}
