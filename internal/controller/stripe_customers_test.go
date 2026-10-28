@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -55,8 +56,12 @@ func (f *statefulStripe) Creates() int {
 // invoiceBilledAccount creates a BillingAccount that billing reports as
 // billed by invoice, with no payment method.
 func invoiceBilledAccount(name string) *billingv1alpha1.BillingAccount {
+	return invoiceBilledAccountIn("default", name)
+}
+
+func invoiceBilledAccountIn(namespace, name string) *billingv1alpha1.BillingAccount {
 	ba := &billingv1alpha1.BillingAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: billingv1alpha1.BillingAccountSpec{
 			CurrencyCode: "USD",
 			ContactInfo:  &billingv1alpha1.BillingContactInfo{Email: name + "@example.com"},
@@ -194,6 +199,20 @@ var _ = Describe("StripeCustomer", func() {
 
 		_, err := reconcilerWith(fake).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)})
 		Expect(err).To(MatchError(ContainSubstring("waiting for it to be garbage collected")))
+		Expect(fake.Calls()).To(BeEmpty())
+	})
+
+	It("skips an account whose namespace is being deleted instead of retrying", func() {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "organization-terminating"}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		ba := invoiceBilledAccountIn(ns.Name, "ba-terminating")
+		// envtest runs no namespace controller, so the namespace stays
+		// Terminating and the API server refuses new objects in it.
+		Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
+		fake := &fakeStripeEnsurer{stubID: "cus_terminating"}
+
+		_, err := reconcilerWith(fake).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ba)})
+		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.Calls()).To(BeEmpty())
 	})
 

@@ -45,6 +45,12 @@ type StripeCustomers struct {
 	locks map[types.NamespacedName]*sync.Mutex
 }
 
+// errNamespaceTerminating is returned by Ensure when the account has no
+// StripeCustomer and its namespace is being deleted, so one can't be
+// created. The account is going away with its namespace: callers skip it
+// rather than retry until the namespace is gone.
+var errNamespaceTerminating = errors.New("namespace is terminating")
+
 // NewStripeCustomers returns a StripeCustomers that writes with c and
 // reads StripeCustomers with reader, which should be uncached
 // (manager.GetAPIReader).
@@ -161,6 +167,9 @@ func (s *StripeCustomers) getOrCreate(ctx context.Context, ba *billingv1alpha1.B
 			return nil, fmt.Errorf("setting owner on StripeCustomer %q: %w", ba.Name, err)
 		}
 		if err := s.client.Create(ctx, &sc); err != nil {
+			if isNamespaceTerminatingForbidden(err) {
+				return nil, fmt.Errorf("creating StripeCustomer %q: %w", ba.Name, errNamespaceTerminating)
+			}
 			return nil, fmt.Errorf("creating StripeCustomer %q: %w", ba.Name, err)
 		}
 		return &sc, nil

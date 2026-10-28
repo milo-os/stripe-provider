@@ -183,6 +183,11 @@ func (r *StripePaymentMethodReconciler) reconcileSetupIntent(ctx context.Context
 	// so adding a card and starting payment terms at the same time can't
 	// create two.
 	customerID, err := r.customers().Ensure(ctx, stripe, &ba)
+	if errors.Is(err, errNamespaceTerminating) {
+		logger.V(1).Info("skipping SetupIntent; namespace terminating",
+			"namespace", spm.Namespace, "stripePaymentMethod", spm.Name)
+		return ctrl.Result{}, nil
+	}
 	// A TaxIDError means the Customer record itself succeeded but the
 	// tax_ids reconcile against it failed (e.g. user-supplied tax ID
 	// rejected by Stripe). The Customer ID is still authoritative and

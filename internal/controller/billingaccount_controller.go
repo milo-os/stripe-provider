@@ -110,6 +110,11 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, err
 	}
 	customerID, err := r.customers().Ensure(ctx, stripe, &ba)
+	if errors.Is(err, errNamespaceTerminating) {
+		logger.V(1).Info("skipping Stripe Customer sync; namespace terminating",
+			"namespace", ba.Namespace, "billingAccount", ba.Name)
+		return ctrl.Result{}, nil
+	}
 	if err != nil {
 		// Tax-ID rejection means the rest of the Customer record did
 		// sync; we'd just loop forever fighting a bad user-supplied
