@@ -272,8 +272,8 @@ var _ = Describe("BillingAccountReconciler", func() {
 		pm := &billingv1alpha1.PaymentMethod{
 			ObjectMeta: metav1.ObjectMeta{Name: "pm-cleared-default", Namespace: ns},
 			Spec: billingv1alpha1.PaymentMethodSpec{
-				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: baName},
-				DisplayName:       "Some card",
+				BillingAccountRef:     billingv1alpha1.BillingAccountRef{Name: baName},
+				DisplayName:           "Some card",
 				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
 			},
 		}
@@ -378,4 +378,3 @@ var _ = Describe("BillingAccountReconciler", func() {
 			"reconcile must still attempt EnsureCustomer once")
 	})
 })
-

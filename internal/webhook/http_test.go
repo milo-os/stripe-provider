@@ -181,8 +181,8 @@ func TestHandleSetupIntentFailed_PropagatesToPaymentMethod(t *testing.T) {
 	pm := &billingv1alpha1.PaymentMethod{
 		ObjectMeta: metav1.ObjectMeta{Name: pmName, Namespace: ns},
 		Spec: billingv1alpha1.PaymentMethodSpec{
-			BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: "ba-declined"},
-			DisplayName:       "Declined card",
+			BillingAccountRef:     billingv1alpha1.BillingAccountRef{Name: "ba-declined"},
+			DisplayName:           "Declined card",
 			PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
 		},
 		Status: billingv1alpha1.PaymentMethodStatus{

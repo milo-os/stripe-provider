@@ -265,8 +265,8 @@ var _ = Describe("findDefaultStripePaymentMethodID", func() {
 		pm := &billingv1alpha1.PaymentMethod{
 			ObjectMeta: metav1.ObjectMeta{Name: "pm-default-pending", Namespace: ns},
 			Spec: billingv1alpha1.PaymentMethodSpec{
-				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: baName},
-				DisplayName:       "Pending card",
+				BillingAccountRef:     billingv1alpha1.BillingAccountRef{Name: baName},
+				DisplayName:           "Pending card",
 				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
 			},
 		}
@@ -286,8 +286,8 @@ var _ = Describe("findDefaultStripePaymentMethodID", func() {
 		ba := &billingv1alpha1.BillingAccount{
 			ObjectMeta: metav1.ObjectMeta{Name: baName, Namespace: ns},
 			Spec: billingv1alpha1.BillingAccountSpec{
-				CurrencyCode: "USD",
-				ContactInfo:  &billingv1alpha1.BillingContactInfo{Email: "p@example.com"},
+				CurrencyCode:            "USD",
+				ContactInfo:             &billingv1alpha1.BillingContactInfo{Email: "p@example.com"},
 				DefaultPaymentMethodRef: &billingv1alpha1.DefaultPaymentMethodRef{Name: pm.Name},
 			},
 		}

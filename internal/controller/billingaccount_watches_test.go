@@ -53,8 +53,8 @@ var _ = Describe("BillingAccountReconciler.enqueueBillingAccountForStripePayment
 		pm := &billingv1alpha1.PaymentMethod{
 			ObjectMeta: metav1.ObjectMeta{Name: "pm-watch", Namespace: ns},
 			Spec: billingv1alpha1.PaymentMethodSpec{
-				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: "ba-target"},
-				DisplayName:       "Card",
+				BillingAccountRef:     billingv1alpha1.BillingAccountRef{Name: "ba-target"},
+				DisplayName:           "Card",
 				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
 			},
 		}

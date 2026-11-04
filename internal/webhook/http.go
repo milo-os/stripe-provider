@@ -13,10 +13,12 @@ import (
 
 	stripego "github.com/stripe/stripe-go/v81"
 	stripewebhook "github.com/stripe/stripe-go/v81/webhook"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -62,6 +64,10 @@ type Webhook struct {
 	// Handler runs after the request is validated. It returns the HTTP
 	// status to write back to Stripe.
 	Handler Handler
+
+	// Recorder records activity timeline Events on PaymentMethods when
+	// setup succeeds or fails. Nil records nothing.
+	Recorder record.EventRecorder
 }
 
 // NewStripeWebhook wires the standard Stripe webhook: signature
@@ -82,6 +88,9 @@ func NewStripeWebhook(c client.Client, providerConfigName string) *Webhook {
 // webhook server. The manager owns TLS termination and lifecycle, so
 // we don't need a separate http.Server here.
 func (wh *Webhook) SetupWithManager(mgr ctrl.Manager) error {
+	if wh.Recorder == nil {
+		wh.Recorder = mgr.GetEventRecorderFor(eventRecorderName) //nolint:staticcheck // SA1019: the events/v1 recorder can't set annotations, which timeline events need.
+	}
 	mgr.GetWebhookServer().Register(Endpoint, wh)
 	return nil
 }
@@ -203,8 +212,9 @@ type setupIntentPayload struct {
 	Customer       string `json:"customer"`
 	PaymentMethod  string `json:"payment_method"`
 	LastSetupError *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code        string `json:"code"`
+		DeclineCode string `json:"decline_code"`
+		Message     string `json:"message"`
 	} `json:"last_setup_error"`
 	Metadata map[string]string `json:"metadata"`
 }
@@ -372,12 +382,16 @@ func (wh *Webhook) patchStripeFailure(ctx context.Context, spm *stripev1alpha1.S
 	return wh.Client.Status().Patch(ctx, spm, patch)
 }
 
+// projectOntoPaymentMethod marks the parent PaymentMethod Active with the
+// confirmed instrument's details, and records PaymentMethodAttached for the
+// activity timeline when it wasn't Active before.
 func (wh *Webhook) projectOntoPaymentMethod(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, pm *stripeinternal.PaymentMethodDetails) error {
 	var bm billingv1alpha1.PaymentMethod
 	key := types.NamespacedName{Namespace: spm.Namespace, Name: spm.Spec.PaymentMethodRef.Name}
 	if err := wh.Client.Get(ctx, key, &bm); err != nil {
 		return fmt.Errorf("getting PaymentMethod %s/%s: %w", key.Namespace, key.Name, err)
 	}
+	wasActive := bm.Status.Phase == billingv1alpha1.PaymentMethodPhaseActive
 	patch := client.MergeFrom(bm.DeepCopy())
 	bm.Status.Phase = billingv1alpha1.PaymentMethodPhaseActive
 	if pm.Type == "card" {
@@ -413,7 +427,14 @@ func (wh *Webhook) projectOntoPaymentMethod(ctx context.Context, spm *stripev1al
 		Reason:             "Active",
 		Message:            "Payment method confirmed by stripe-provider.",
 	})
-	return wh.Client.Status().Patch(ctx, &bm, patch)
+	if err := wh.Client.Status().Patch(ctx, &bm, patch); err != nil {
+		return err
+	}
+	if !wasActive {
+		recordPaymentMethodEvent(wh.Recorder, &bm, attachedEventDetail(&bm), corev1.EventTypeNormal,
+			billingv1alpha1.EventReasonPaymentMethodAttached, "Payment method is ready to use.")
+	}
+	return nil
 }
 
 // projectFailureOntoPaymentMethod mirrors patchStripeFailure onto the
@@ -423,13 +444,15 @@ func (wh *Webhook) projectOntoPaymentMethod(ctx context.Context, spm *stripev1al
 // last_setup_error, and flips the InstrumentReady condition to False
 // with the same reason. Idempotent against a SetupIntent that fires the
 // event twice — the field assignments and condition update are
-// deterministic.
+// deterministic, and PaymentMethodFailed is recorded for the activity
+// timeline only when the PaymentMethod wasn't Failed before.
 func (wh *Webhook) projectFailureOntoPaymentMethod(ctx context.Context, spm *stripev1alpha1.StripePaymentMethod, si *setupIntentPayload) error {
 	var bm billingv1alpha1.PaymentMethod
 	key := types.NamespacedName{Namespace: spm.Namespace, Name: spm.Spec.PaymentMethodRef.Name}
 	if err := wh.Client.Get(ctx, key, &bm); err != nil {
 		return fmt.Errorf("getting PaymentMethod %s/%s: %w", key.Namespace, key.Name, err)
 	}
+	wasFailed := bm.Status.Phase == billingv1alpha1.PaymentMethodPhaseFailed
 	patch := client.MergeFrom(bm.DeepCopy())
 	bm.Status.Phase = billingv1alpha1.PaymentMethodPhaseFailed
 	reason := "SetupIntentFailed"
@@ -451,5 +474,12 @@ func (wh *Webhook) projectFailureOntoPaymentMethod(ctx context.Context, spm *str
 		Reason:             reason,
 		Message:            msg,
 	})
-	return wh.Client.Status().Patch(ctx, &bm, patch)
+	if err := wh.Client.Status().Patch(ctx, &bm, patch); err != nil {
+		return err
+	}
+	if !wasFailed {
+		recordPaymentMethodEvent(wh.Recorder, &bm, failedEventDetail(&bm, si), corev1.EventTypeWarning,
+			billingv1alpha1.EventReasonPaymentMethodFailed, "Payment method could not be added.")
+	}
+	return nil
 }
