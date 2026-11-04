@@ -21,4 +21,6 @@ func MethodNotAllowedResponse() Response { return Response{HttpStatus: http.Stat
 
 // InternalServerErrorResponse signals a transient failure. Stripe will
 // retry with backoff (~3 days).
-func InternalServerErrorResponse() Response { return Response{HttpStatus: http.StatusInternalServerError} }
+func InternalServerErrorResponse() Response {
+	return Response{HttpStatus: http.StatusInternalServerError}
+}
