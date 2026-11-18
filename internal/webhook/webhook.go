@@ -17,7 +17,7 @@ package webhook
 import (
 	"context"
 
-	stripego "github.com/stripe/stripe-go/v81"
+	stripego "github.com/stripe/stripe-go/v87"
 )
 
 // Endpoint is the route Stripe is configured to deliver events to.

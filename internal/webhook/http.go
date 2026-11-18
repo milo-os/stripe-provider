@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"time"
 
-	stripego "github.com/stripe/stripe-go/v81"
-	stripewebhook "github.com/stripe/stripe-go/v81/webhook"
+	stripego "github.com/stripe/stripe-go/v87"
+	stripewebhook "github.com/stripe/stripe-go/v87/webhook"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
