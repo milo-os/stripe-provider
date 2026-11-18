@@ -304,10 +304,11 @@ Each spec line becomes one Stripe invoice item on the invoice.
 - `price_data.product`: the SKU's `StripeProduct`.
 - `price_data.unit_amount_decimal`: `unitAmount`, in cents.
 - `price_data.tax_behavior`: `exclusive`, always.
-- `quantity`: `quantity`. A decimal quantity needs Stripe's
-  `quantity_decimal`, which needs a newer API version than stripe-go v81
-  gives us. Until then, a line whose quantity isn't whole is written as
-  1 × its amount. See [Open Questions](#open-questions).
+- `quantity_decimal`: `quantity`, so a prorated line can read
+  "0.43 × $1,000.00". This needs stripe-go v87 (API `2026-10-28.endive`),
+  which stripe-provider is upgraded to first. The source still decides
+  whether a prorated line has a decimal quantity or 1 × its amount, so that
+  [amounts match](#checking-amounts).
 - `description`: `description`. The SKU is on the Product, so it's no longer
   in the name.
 
@@ -328,7 +329,9 @@ Each spec line becomes one Stripe invoice item on the invoice.
 - `tax.taxable: false` writes Stripe's nontaxable code (`txcd_00000000`)
   instead.
 - Tax location by facility isn't supported. Every line is taxed at the
-  customer's address. See [Open Questions](#open-questions).
+  customer's address. Stripe's new tax locations (`tax_details.performance_location`
+  on Products and lines) are for event tickets only, so they don't cover it.
+  See [Open Questions](#open-questions).
 
 ### Discounts
 
@@ -461,6 +464,8 @@ Previews have no PDF or hosted page in Stripe. The staff portal renders
 
 Each phase ships on its own.
 
+0. **Upgrade stripe-go to v87.** It pins Stripe API `2026-10-28.endive`,
+   for decimal quantities, and moves the client to `stripe.Client`.
 1. **Tax codes through OpenMeter.** billing: `ServicePricing` tax settings.
    openmeter-provider: rate card tax codes. Lines are taxed per product from
    here on.
@@ -497,9 +502,9 @@ Alerts:
 
 ## Open Questions
 
-- **Decimal quantities.** Prorated lines read "1 × amount" until we move to a
-  Stripe API version with `quantity_decimal`. Is upgrading stripe-go worth it
-  for this?
+- **Prorated lines.** Decimal quantities are available once stripe-go is
+  on v87. Finance still chooses between "0.43 × $1,000.00" and
+  "1 × $430.00" (an open question in the enhancement).
 - **Tax by facility.** Stripe Tax taxes an invoice at the customer's
   location. A line taxed where its facility is may need its own invoice,
   with the facility as the shipping address. To confirm with Stripe.
