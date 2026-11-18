@@ -120,6 +120,7 @@ func TestSetupIntentFailed_RecordsFailedOnceWithoutStripeDetail(t *testing.T) {
 	deliver := func(eventID, eventType string) {
 		t.Helper()
 		body := []byte(`{
+			"object":"event",
 			"id":"` + eventID + `",
 			"type":"` + eventType + `",
 			"data":{"object":{

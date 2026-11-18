@@ -13,14 +13,13 @@ import (
 	"sync/atomic"
 	"testing"
 
-	stripego "github.com/stripe/stripe-go/v81"
-	stripeclient "github.com/stripe/stripe-go/v81/client"
+	stripego "github.com/stripe/stripe-go/v87"
 )
 
 // newClientForBackend constructs a *Client pointed at the supplied
 // httptest server URL. It bypasses NewClient (which doesn't expose a
-// URL override) by initializing the SDK's *client.API directly with a
-// BackendConfig.URL set to the test server.
+// URL override) by building the SDK's client with backends whose
+// BackendConfig.URL is the test server.
 func newClientForBackend(t *testing.T, baseURL string) *Client {
 	t.Helper()
 	parsed, err := url.Parse(baseURL)
@@ -36,9 +35,7 @@ func newClientForBackend(t *testing.T, baseURL string) *Client {
 		API:     stripego.GetBackendWithConfig(stripego.APIBackend, cfg),
 		Uploads: stripego.GetBackendWithConfig(stripego.UploadsBackend, cfg),
 	}
-	api := &stripeclient.API{}
-	api.Init("sk_test_dummy", backends)
-	return &Client{api: api}
+	return &Client{api: stripego.NewClient("sk_test_dummy", stripego.WithBackends(backends))}
 }
 
 func TestBackfillCustomerName_NoOpOnEmptyInputs(t *testing.T) {

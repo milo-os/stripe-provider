@@ -10,21 +10,19 @@ import (
 	"strings"
 	"time"
 
-	stripego "github.com/stripe/stripe-go/v81"
-	stripeclient "github.com/stripe/stripe-go/v81/client"
+	stripego "github.com/stripe/stripe-go/v87"
 )
 
 // Client is the narrow SDK surface the provider needs. Constructed per
 // reconcile from a ResolvedConfig — Stripe API keys are configuration,
 // not a long-lived process credential.
 type Client struct {
-	api *stripeclient.API
+	api *stripego.Client
 }
 
 // NewClient builds a Stripe API client.
 func NewClient(cfg *ResolvedConfig) *Client {
-	api := stripeclient.New(cfg.SecretKey, nil)
-	return &Client{api: api}
+	return &Client{api: stripego.NewClient(cfg.SecretKey)}
 }
 
 // CustomerDetails carries the BillingAccount-derived fields that
@@ -137,14 +135,13 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID string, account 
 		existingID = found
 	}
 
-	params := &stripego.CustomerParams{
-		Params:   stripego.Params{Context: ctx},
+	params := &stripego.CustomerUpdateParams{
 		Metadata: billingAccountMetadata(account),
 	}
 	applyCustomerDetails(params, details)
 
 	if existingID == "" {
-		cu, err := c.api.Customers.New(params)
+		cu, err := c.api.V1Customers.Create(ctx, customerCreateParams(params))
 		if err != nil {
 			return "", fmt.Errorf("creating Stripe customer: %w", err)
 		}
@@ -156,7 +153,7 @@ func (c *Client) EnsureCustomer(ctx context.Context, existingID string, account 
 		return cu.ID, nil
 	}
 
-	if _, err := c.api.Customers.Update(existingID, params); err != nil {
+	if _, err := c.api.V1Customers.Update(ctx, existingID, params); err != nil {
 		return existingID, fmt.Errorf("updating Stripe customer %q: %w", existingID, err)
 	}
 	if err := c.reconcileTaxIDs(ctx, existingID, details.TaxIDs); err != nil {
@@ -226,19 +223,17 @@ func (c *Client) findCustomerByBillingAccount(ctx context.Context, account Billi
 func (c *Client) searchCustomer(ctx context.Context, query string, match func(*stripego.Customer) bool) (string, error) {
 	params := &stripego.CustomerSearchParams{
 		SearchParams: stripego.SearchParams{
-			Context: ctx,
-			Query:   query,
-			Limit:   stripego.Int64(10),
+			Query: query,
+			Limit: stripego.Int64(10),
 		},
 	}
-	iter := c.api.Customers.Search(params)
-	for iter.Next() {
-		if cu := iter.Customer(); match(cu) {
+	for cu, err := range c.api.V1Customers.Search(ctx, params).All(ctx) {
+		if err != nil {
+			return "", err
+		}
+		if match(cu) {
 			return cu.ID, nil
 		}
-	}
-	if err := iter.Err(); err != nil {
-		return "", err
 	}
 	return "", nil
 }
@@ -257,7 +252,7 @@ func escapeSearchQueryValue(v string) string {
 	return string(out)
 }
 
-func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
+func applyCustomerDetails(params *stripego.CustomerUpdateParams, d CustomerDetails) {
 	if d.Name != "" {
 		params.Name = stripego.String(d.Name)
 	}
@@ -300,17 +295,43 @@ func applyCustomerDetails(params *stripego.CustomerParams, d CustomerDetails) {
 	//
 	// The invoice fields are always sent too: stripe-go encodes an empty,
 	// non-nil list as `custom_fields=`, which clears them.
-	fields := make([]*stripego.CustomerInvoiceSettingsCustomFieldParams, 0, len(d.InvoiceFields))
+	fields := make([]*stripego.CustomerUpdateInvoiceSettingsCustomFieldParams, 0, len(d.InvoiceFields))
 	for _, f := range d.InvoiceFields {
-		fields = append(fields, &stripego.CustomerInvoiceSettingsCustomFieldParams{
+		fields = append(fields, &stripego.CustomerUpdateInvoiceSettingsCustomFieldParams{
 			Name:  stripego.String(f.Name),
 			Value: stripego.String(f.Value),
 		})
 	}
-	params.InvoiceSettings = &stripego.CustomerInvoiceSettingsParams{
+	params.InvoiceSettings = &stripego.CustomerUpdateInvoiceSettingsParams{
 		DefaultPaymentMethod: stripego.String(d.DefaultPaymentMethodID),
 		CustomFields:         fields,
 	}
+}
+
+// customerCreateParams is the create request for the customer that
+// applyCustomerDetails describes. Stripe's create and update requests take
+// the same customer fields, as separate types.
+func customerCreateParams(u *stripego.CustomerUpdateParams) *stripego.CustomerCreateParams {
+	p := &stripego.CustomerCreateParams{
+		Name:     u.Name,
+		Email:    u.Email,
+		Address:  u.Address,
+		Metadata: u.Metadata,
+	}
+	if u.InvoiceSettings != nil {
+		fields := make([]*stripego.CustomerCreateInvoiceSettingsCustomFieldParams, 0, len(u.InvoiceSettings.CustomFields))
+		for _, f := range u.InvoiceSettings.CustomFields {
+			fields = append(fields, &stripego.CustomerCreateInvoiceSettingsCustomFieldParams{
+				Name:  f.Name,
+				Value: f.Value,
+			})
+		}
+		p.InvoiceSettings = &stripego.CustomerCreateInvoiceSettingsParams{
+			DefaultPaymentMethod: u.InvoiceSettings.DefaultPaymentMethod,
+			CustomFields:         fields,
+		}
+	}
+	return p
 }
 
 func nilIfEmpty(s string) *string {
@@ -364,16 +385,13 @@ func (c *Client) reconcileTaxIDs(ctx context.Context, customerID string, desired
 	}
 	// Build the existing set.
 	existing := map[string]string{} // key = "type=value", val = stripe txi_… id
-	iter := c.api.TaxIDs.List(&stripego.TaxIDListParams{
-		Customer:   stripego.String(customerID),
-		ListParams: stripego.ListParams{Context: ctx},
-	})
-	for iter.Next() {
-		t := iter.TaxID()
+	for t, err := range c.api.V1TaxIDs.List(ctx, &stripego.TaxIDListParams{
+		Customer: stripego.String(customerID),
+	}).All(ctx) {
+		if err != nil {
+			return fmt.Errorf("listing Customer tax_ids on %q: %w", customerID, err)
+		}
 		existing[string(t.Type)+"="+t.Value] = t.ID
-	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("listing Customer tax_ids on %q: %w", customerID, err)
 	}
 
 	desiredKeys := map[string]struct{}{}
@@ -383,11 +401,10 @@ func (c *Client) reconcileTaxIDs(ctx context.Context, customerID string, desired
 		if _, ok := existing[key]; ok {
 			continue
 		}
-		if _, err := c.api.TaxIDs.New(&stripego.TaxIDParams{
+		if _, err := c.api.V1TaxIDs.Create(ctx, &stripego.TaxIDCreateParams{
 			Customer: stripego.String(customerID),
 			Type:     stripego.String(d.Type),
 			Value:    stripego.String(d.Value),
-			Params:   stripego.Params{Context: ctx},
 		}); err != nil {
 			return fmt.Errorf("creating tax_id %s=%s on Customer %q: %w", d.Type, d.Value, customerID, err)
 		}
@@ -396,9 +413,8 @@ func (c *Client) reconcileTaxIDs(ctx context.Context, customerID string, desired
 		if _, want := desiredKeys[key]; want {
 			continue
 		}
-		if _, err := c.api.TaxIDs.Del(id, &stripego.TaxIDParams{
+		if _, err := c.api.V1TaxIDs.Delete(ctx, id, &stripego.TaxIDDeleteParams{
 			Customer: stripego.String(customerID),
-			Params:   stripego.Params{Context: ctx},
 		}); err != nil {
 			return fmt.Errorf("deleting tax_id %q on Customer %q: %w", id, customerID, err)
 		}
@@ -421,17 +437,16 @@ func (c *Client) CreateSetupIntent(ctx context.Context, customerID, stripePaymen
 	if customerID == "" {
 		return nil, errors.New("CreateSetupIntent requires a customer id")
 	}
-	params := &stripego.SetupIntentParams{
-		Params: stripego.Params{Context: ctx},
+	params := &stripego.SetupIntentCreateParams{
 		Metadata: map[string]string{
 			"stripe_payment_method_namespace": stripePaymentMethodNamespace,
 			"stripe_payment_method_name":      stripePaymentMethodName,
 		},
-		Customer:           stripego.String(customerID),
-		Usage:              stripego.String(string(stripego.SetupIntentUsageOffSession)),
-		PaymentMethodTypes: stripego.StringSlice([]string{"card"}),
+		Customer:                  stripego.String(customerID),
+		Usage:                     stripego.String(string(stripego.SetupIntentUsageOffSession)),
+		AllowedPaymentMethodTypes: stripego.StringSlice([]string{"card"}),
 	}
-	si, err := c.api.SetupIntents.New(params)
+	si, err := c.api.V1SetupIntents.Create(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("creating Stripe SetupIntent: %w", err)
 	}
@@ -483,9 +498,7 @@ func (c *Client) DetachPaymentMethod(ctx context.Context, paymentMethodID string
 	if paymentMethodID == "" {
 		return nil
 	}
-	if _, err := c.api.PaymentMethods.Detach(paymentMethodID, &stripego.PaymentMethodDetachParams{
-		Params: stripego.Params{Context: ctx},
-	}); err != nil {
+	if _, err := c.api.V1PaymentMethods.Detach(ctx, paymentMethodID, &stripego.PaymentMethodDetachParams{}); err != nil {
 		if stripeErr, ok := err.(*stripego.Error); ok {
 			// resource_missing — Stripe has no record of the PM (already
 			// detached, deleted, never created). Idempotent path.
@@ -504,9 +517,7 @@ func (c *Client) CancelSetupIntent(ctx context.Context, setupIntentID string) er
 	if setupIntentID == "" {
 		return nil
 	}
-	if _, err := c.api.SetupIntents.Cancel(setupIntentID, &stripego.SetupIntentCancelParams{
-		Params: stripego.Params{Context: ctx},
-	}); err != nil {
+	if _, err := c.api.V1SetupIntents.Cancel(ctx, setupIntentID, &stripego.SetupIntentCancelParams{}); err != nil {
 		if stripeErr, ok := err.(*stripego.Error); ok {
 			switch stripeErr.Code {
 			case stripego.ErrorCodeResourceMissing,
@@ -521,9 +532,7 @@ func (c *Client) CancelSetupIntent(ctx context.Context, setupIntentID string) er
 
 // RetrievePaymentMethod fetches a confirmed PaymentMethod.
 func (c *Client) RetrievePaymentMethod(ctx context.Context, paymentMethodID string) (*PaymentMethodDetails, error) {
-	pm, err := c.api.PaymentMethods.Get(paymentMethodID, &stripego.PaymentMethodParams{
-		Params: stripego.Params{Context: ctx},
-	})
+	pm, err := c.api.V1PaymentMethods.Retrieve(ctx, paymentMethodID, &stripego.PaymentMethodRetrieveParams{})
 	if err != nil {
 		return nil, fmt.Errorf("retrieving PaymentMethod %q: %w", paymentMethodID, err)
 	}
@@ -573,9 +582,7 @@ func (c *Client) BackfillCustomerName(ctx context.Context, customerID, name stri
 	if customerID == "" || name == "" {
 		return nil
 	}
-	cu, err := c.api.Customers.Get(customerID, &stripego.CustomerParams{
-		Params: stripego.Params{Context: ctx},
-	})
+	cu, err := c.api.V1Customers.Retrieve(ctx, customerID, &stripego.CustomerRetrieveParams{})
 	if err != nil {
 		if stripeErr, ok := err.(*stripego.Error); ok && stripeErr.Code == stripego.ErrorCodeResourceMissing {
 			return nil
@@ -585,9 +592,8 @@ func (c *Client) BackfillCustomerName(ctx context.Context, customerID, name stri
 	if cu.Name != "" {
 		return nil
 	}
-	if _, err := c.api.Customers.Update(customerID, &stripego.CustomerParams{
-		Name:   stripego.String(name),
-		Params: stripego.Params{Context: ctx},
+	if _, err := c.api.V1Customers.Update(ctx, customerID, &stripego.CustomerUpdateParams{
+		Name: stripego.String(name),
 	}); err != nil {
 		return fmt.Errorf("backfilling Stripe customer %q name: %w", customerID, err)
 	}

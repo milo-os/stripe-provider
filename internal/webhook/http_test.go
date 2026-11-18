@@ -81,7 +81,7 @@ func newTestWebhook(t *testing.T, dedupe EventDeduper, extra ...client.Object) (
 
 func TestWebhook_RejectsMissingSignature(t *testing.T) {
 	wh, _ := newTestWebhook(t, nil)
-	body := []byte(`{"id":"evt_1","type":"setup_intent.succeeded","data":{}}`)
+	body := []byte(`{"object":"event","id":"evt_1","type":"setup_intent.succeeded","data":{}}`)
 	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	wh.ServeHTTP(rec, req)
@@ -92,7 +92,7 @@ func TestWebhook_RejectsMissingSignature(t *testing.T) {
 
 func TestWebhook_RejectsInvalidSignature(t *testing.T) {
 	wh, _ := newTestWebhook(t, nil)
-	body := []byte(`{"id":"evt_1","type":"setup_intent.succeeded","data":{"object":{"id":"seti_1"}}}`)
+	body := []byte(`{"object":"event","id":"evt_1","type":"setup_intent.succeeded","data":{"object":{"id":"seti_1"}}}`)
 	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req.Header.Set("Stripe-Signature", "t=1,v1=deadbeef")
 	rec := httptest.NewRecorder()
@@ -114,7 +114,7 @@ func TestWebhook_RejectsNonPost(t *testing.T) {
 
 func TestWebhook_AcceptsValidSignedUnhandledEventNoOp(t *testing.T) {
 	wh, _ := newTestWebhook(t, nil)
-	body := []byte(`{"id":"evt_ignored","type":"customer.created","data":{"object":{"id":"cus_1"}}}`)
+	body := []byte(`{"object":"event","id":"evt_ignored","type":"customer.created","data":{"object":{"id":"cus_1"}}}`)
 	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
 	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
 	req.Header.Set("Stripe-Signature", sig)
@@ -128,7 +128,7 @@ func TestWebhook_AcceptsValidSignedUnhandledEventNoOp(t *testing.T) {
 func TestWebhook_DedupesRepeatedEventID(t *testing.T) {
 	dedupe := stripeinternal.NewMemoryDeduper(0)
 	wh, _ := newTestWebhook(t, dedupe)
-	body := []byte(`{"id":"evt_dup","type":"customer.created","data":{"object":{"id":"cus_1"}}}`)
+	body := []byte(`{"object":"event","id":"evt_dup","type":"customer.created","data":{"object":{"id":"cus_1"}}}`)
 	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
 
 	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
@@ -155,7 +155,7 @@ func TestWebhook_RejectsOversizedBody(t *testing.T) {
 	wh, _ := newTestWebhook(t, nil)
 	// Past maxBodyBytes (262144). The handler truncates the read; the
 	// resulting body won't verify against the signature.
-	body := []byte(`{"id":"evt_big","type":"customer.created","data":{"object":` +
+	body := []byte(`{"object":"event","id":"evt_big","type":"customer.created","data":{"object":` +
 		strings.Repeat(`"x"`, 300_000) + `}}`)
 	sig := stripeSignature(t, body, testWebhookSecret, time.Now())
 	req := httptest.NewRequest(http.MethodPost, Endpoint, bytes.NewReader(body))
@@ -209,6 +209,7 @@ func TestHandleSetupIntentFailed_PropagatesToPaymentMethod(t *testing.T) {
 	// in newTestWebhook lined the types up. Pre-create body verified.
 
 	body := []byte(`{
+		"object":"event",
 		"id":"evt_failed",
 		"type":"setup_intent.setup_failed",
 		"data":{"object":{

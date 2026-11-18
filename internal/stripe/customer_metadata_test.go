@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	stripego "github.com/stripe/stripe-go/v81"
+	stripego "github.com/stripe/stripe-go/v87"
 )
 
 // TestApplyCustomerDetails_StampsMetadata exercises the post-merge
@@ -136,8 +136,8 @@ func TestEnsureCustomer_UpdatePathSendsMetadata(t *testing.T) {
 	}
 }
 
-func newParams(initialMetadata map[string]string) *stripego.CustomerParams {
-	return &stripego.CustomerParams{
+func newParams(initialMetadata map[string]string) *stripego.CustomerUpdateParams {
+	return &stripego.CustomerUpdateParams{
 		Metadata: initialMetadata,
 	}
 }
