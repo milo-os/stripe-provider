@@ -107,6 +107,16 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "name", "StripeProviderConfig")
 		os.Exit(1)
 	}
+	// Stripe Products for the catalog: one per SKU, so invoice lines can
+	// name what was sold.
+	if err = (&controller.ServicePricingProductReconciler{}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "name", "ServicePricingProduct")
+		os.Exit(1)
+	}
+	if err = (&controller.StripeProductReconciler{ProviderConfigName: providerConfigName}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "name", "StripeProduct")
+		os.Exit(1)
+	}
 
 	// Register the Stripe webhook on the manager's shared webhook
 	// server (port webhookPort, TLS via webhookCertDir). Public

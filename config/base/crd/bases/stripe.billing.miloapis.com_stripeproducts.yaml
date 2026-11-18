@@ -1,0 +1,203 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: stripeproducts.stripe.billing.miloapis.com
+spec:
+  group: stripe.billing.miloapis.com
+  names:
+    kind: StripeProduct
+    listKind: StripeProductList
+    plural: stripeproducts
+    singular: stripeproduct
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.sku
+      name: SKU
+      type: string
+    - jsonPath: .status.productId
+      name: Product
+      type: string
+    - jsonPath: .status.taxCode
+      name: Tax code
+      type: string
+    - jsonPath: .status.active
+      name: Active
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          StripeProduct is the Schema for the stripeproducts API.
+
+          StripeProduct keeps a Stripe Product in step with the ServicePricings of
+          one SKU, so invoice lines can name what was sold. The stripe-provider
+          creates one in the pricings' namespace for each SKU, and one for each
+          list pricing without a SKU. Nobody else writes them. A price changing
+          never changes the Product: lines carry their own unit price.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              StripeProductSpec defines the desired state of a StripeProduct.
+
+              A StripeProduct stands for every ServicePricing with its SKU, or for
+              one pricing without a SKU and the customer pricings based on it. Exactly
+              one of sku and pricingRef is set.
+            properties:
+              pricingRef:
+                description: |-
+                  PricingRef names the one list ServicePricing, in this namespace, that
+                  this Product stands for when it has no SKU. Customer pricings based on
+                  it share the Product.
+                properties:
+                  name:
+                    description: Name is the name of the ServicePricing.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              sku:
+                description: |-
+                  SKU is the product code of the ServicePricings this Product stands
+                  for, exactly as they spell it.
+                maxLength: 64
+                minLength: 1
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+            - message: exactly one of sku and pricingRef is set
+              rule: has(self.sku) != has(self.pricingRef)
+          status:
+            description: StripeProductStatus defines the observed state of a StripeProduct.
+            properties:
+              active:
+                description: |-
+                  Active is false once no ServicePricing stands for the Product. Stripe
+                  keeps an invoiced Product, so it's archived rather than deleted, and
+                  made active again if a pricing comes back.
+                type: boolean
+              conditions:
+                description: Conditions represent the latest available observations.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              name:
+                description: |-
+                  Name is the Product's name in Stripe: the display name of the newest
+                  list pricing, or its name when it has no display name.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the
+                  controller.
+                format: int64
+                type: integer
+              pricings:
+                description: |-
+                  Pricings are the ServicePricings the Product stands for, list
+                  pricings and customer pricings alike, sorted by name.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              productId:
+                description: |-
+                  ProductID is the Stripe Product ID. Invoice lines for the
+                  pricings this Product stands for name it.
+                type: string
+              taxCode:
+                description: |-
+                  TaxCode is the Product's Stripe tax code, from the newest list
+                  pricing. Empty when it has none, so the account's default applies.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

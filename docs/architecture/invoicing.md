@@ -91,35 +91,41 @@ draft until then, so nothing is lost.
 
 ## Resources
 
-Both are in `stripe.miloapis.com/v1alpha1`, next to `StripeCustomer`.
+Both are in `stripe.billing.miloapis.com/v1alpha1`, next to `StripeCustomer`.
 
 ### StripeProduct
 
-One per SKU, in `milo-system`, where `ServicePricing`s live. Named from the
-SKU, lower-cased, with a short hash of the exact SKU so case and punctuation
-never collide (`sku-dc-cab-01-3f9a2c`). A `ServicePricing` without a SKU
-gets one of its own, named `pricing-<name>`.
+One per SKU, in the namespace of its `ServicePricing`s (`milo-system`).
+Named from the SKU, lower-cased, with a short hash of the exact SKU so case
+and punctuation never collide (`sku-dc-cab-01-3f9a2c`). A list
+`ServicePricing` without a SKU gets one of its own, named `pricing-<name>`,
+which customer pricings based on it share.
 
 ```yaml
-apiVersion: stripe.miloapis.com/v1alpha1
+apiVersion: stripe.billing.miloapis.com/v1alpha1
 kind: StripeProduct
 metadata:
   name: sku-dc-cab-01-3f9a2c
   namespace: milo-system
 spec:
-  sku: DC-CAB-01              # exact SKU; empty for a pricing without one
-  pricingRef: ""              # set only for a pricing without a SKU
+  sku: DC-CAB-01              # exact SKU; or pricingRef for a pricing without one
 status:
-  productId: prod_...
+  productId: datum_3f9a...    # chosen by us, from the StripeProduct's name
   name: Structured cabling    # from the newest list pricing
-  taxCode: txcd_...           # from the list pricings
-  active: true                # false once no live pricing uses the SKU
-  pricings: [cabling-v1, cabling-v2]
+  taxCode: txcd_20030000      # from the newest list pricing
+  active: true                # false once no pricing stands for it
+  pricings: [acme-cabling, cabling-v1, cabling-v2]
   conditions: [Ready, TaxCodeConflict]
 ```
 
-The product controller creates and deletes these. Nobody else writes them.
-Other controllers find a SKU's Product through `status.productId`.
+The product controller creates these, and never deletes them: a Product
+nothing sells any more is archived. Nobody else writes them. Other
+controllers find a SKU's Product through `status.productId`.
+
+The Product's ID is ours: `datum_` and a hash of the StripeProduct's
+namespace and name. A create retried after a lost response finds the ID
+taken and updates that Product instead of making another, so no search of
+Stripe is needed.
 
 ### StripeInvoice
 
@@ -128,7 +134,7 @@ One per invoice to write, in the billing account's namespace, next to its
 openmeter-provider, and the name is derived from OpenMeter's invoice ID.
 
 ```yaml
-apiVersion: stripe.miloapis.com/v1alpha1
+apiVersion: stripe.billing.miloapis.com/v1alpha1
 kind: StripeInvoice
 metadata:
   name: om-01jd...            # from OpenMeter's invoice ID
@@ -194,13 +200,20 @@ agreement reference. They're not repeated on the spec.
 
 ### Product controller
 
-Watches `ServicePricing`s in `milo-system`. For each SKU it:
+Two reconcilers:
 
-1. creates or updates the `StripeProduct`;
-2. creates or updates the Stripe Product: name, `tax_code`, metadata
-   (`datum_sku`, the environment) and `active`;
-3. sets `TaxCodeConflict` when list pricings with one SKU disagree on their
-   tax code, and keeps the Product's current code until they agree.
+1. **ServicePricing → StripeProduct.** Each `ServicePricing` gets the
+   `StripeProduct` that stands for it, created if it's missing.
+2. **StripeProduct → Stripe.** For each `StripeProduct`, it reads the
+   pricings it stands for and creates or updates the Stripe Product: name,
+   `tax_code`, `active` and metadata (`datum_sku`, `datum_stripe_product`,
+   `datum_managed_by`). Only fields that differ are sent. A
+   `ServicePricing` event requeues its `StripeProduct`.
+
+It sets `TaxCodeConflict` when list pricings with one SKU are taxed
+differently. The newest one still decides: pricings are immutable, so a SKU
+priced before tax codes existed would otherwise never get one. The
+condition names the others, for finance to check.
 
 The rules from the enhancement:
 
@@ -211,6 +224,10 @@ The rules from the enhancement:
 - No Stripe Prices. Lines pass their unit price inline.
 - A Product is archived (`active: false`) once no pricing uses its SKU, and
   reactivated if one does again. Stripe won't delete an invoiced Product.
+  An archived Product keeps its last name and tax code.
+- A pricing that isn't taxable makes its Product Stripe's nontaxable
+  `txcd_00000000`. One with no tax leaves the Product without a code, so the
+  account's default applies.
 
 Products are created when a pricing is applied, so previews can use them
 before anything is billed.

@@ -25,6 +25,7 @@ rules:
   - billingaccounts
   - paymentmethodclasses
   - paymentmethods
+  - servicepricings
   verbs:
   - get
   - list
@@ -53,6 +54,7 @@ rules:
   resources:
   - stripecustomers/status
   - stripepaymentmethods/status
+  - stripeproducts/status
   - stripeproviderconfigs/status
   verbs:
   - get
@@ -76,6 +78,15 @@ rules:
   - stripepaymentmethods/finalizers
   verbs:
   - update
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
+  - stripeproducts
+  verbs:
+  - create
+  - get
+  - list
+  - watch
 - apiGroups:
   - stripe.billing.miloapis.com
   resources:
