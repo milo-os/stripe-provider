@@ -23,6 +23,13 @@ in the billing repo for the full design.
 | `StripePaymentMethod` | Namespace | Provider-owned state for a single `PaymentMethod`. Child of the parent `PaymentMethod` via `ownerReference`. |
 | `StripeCustomer` | Namespace | The Stripe `Customer` for a `BillingAccount`, named after it and owned by it. `status.stripeCustomerId` is what invoicing providers bill, so an account with payment terms can be invoiced without a card. |
 
+## Invoicing
+
+stripe-provider is taking over writing invoices to Stripe from OpenMeter's
+Stripe app, with a Product, quantity, unit price, service period and tax
+settings on every line. See
+[`docs/architecture/invoicing.md`](docs/architecture/invoicing.md).
+
 ## Components
 
 - **PaymentMethod watcher** — watches billing `PaymentMethod` resources;
