@@ -22,6 +22,7 @@ in the billing repo for the full design.
 | `StripeProviderConfig` | Cluster | Operator-configured Stripe SDK settings (publishable key) referenced by a `PaymentMethodClass.spec.parametersRef`. |
 | `StripePaymentMethod` | Namespace | Provider-owned state for a single `PaymentMethod`. Child of the parent `PaymentMethod` via `ownerReference`. |
 | `StripeCustomer` | Namespace | The Stripe `Customer` for a `BillingAccount`, named after it and owned by it. `status.stripeCustomerId` is what invoicing providers bill, so an account with payment terms can be invoiced without a card. |
+| `StripeProduct` | Namespace | The Stripe `Product` for one SKU of the catalog (or one list `ServicePricing` without a SKU), named and taxed as its newest list pricing. Invoice lines name it. See [`docs/architecture/invoicing.md`](docs/architecture/invoicing.md#stripeproduct). |
 
 ## Invoicing
 
@@ -47,6 +48,9 @@ settings on every line. See
   an account never gets two. While the account is on payment terms, the
   terms' PO number and agreement reference are printed on every invoice
   (`invoice_settings.custom_fields`).
+- **Product controllers** — give every `ServicePricing` a
+  `StripeProduct`, one per SKU, and keep its Stripe `Product`'s name, tax
+  code and active flag in step with the newest list pricing.
 - **Webhook server** — receives Stripe `setup_intent.*` events on
   `POST /webhooks/stripe`. Signature-verified via the per-class webhook
   secret stored in the `Secret` referenced by `StripeProviderConfig`.
