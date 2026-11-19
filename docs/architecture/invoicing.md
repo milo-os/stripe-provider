@@ -149,7 +149,7 @@ spec:
   lines:
     - key: 01JD...LINE        # stable; OpenMeter's line ID for its invoices
       description: Structured cabling
-      sku: DC-CAB-01          # resolved to a StripeProduct
+      servicePricingRef: {name: cabling-v2}  # its StripeProduct is the line's Product
       quantity: "4"           # decimal string
       unitAmount: "300.00"    # decimal string, before discounts
       amount: "1200.00"       # what the source charged, before discounts
@@ -172,9 +172,10 @@ status:
     - key: 01JD...LINE
       invoiceItemId: ii_...
       amount: "1200.00"
-      discountAmount: "120.00"
-      taxAmount: "86.40"
-  subtotal: "1080.00"
+      discount: "120.00"
+      tax: "86.40"
+  subtotal: "1200.00"
+  discount: "120.00"
   tax: "86.40"
   total: "1166.40"
   hostedInvoiceUrl: ""        # set at finalization
@@ -183,9 +184,16 @@ status:
   observedGeneration: 3
 ```
 
+Built so far: `Preview` and `PreviewDraft`. For those the whole spec is
+immutable, so a new preview is a new `StripeInvoice`. `Invoice`, `source`,
+`finalize` and the status fields for a real invoice come with the
+[invoice controller](#invoice-controller).
+
 Rules, enforced by CEL:
 
 - `purpose` and `billingAccountRef` are immutable.
+- A line's period can't end before it starts, and a line that isn't taxable
+  can't have a tax code.
 - Once `finalize` is true, the spec is immutable: Stripe won't change a
   finalized invoice.
 - `finalize` is only allowed for `purpose: Invoice`.
@@ -318,7 +326,7 @@ Each spec line becomes one Stripe invoice item on the invoice.
 
 ### Products and prices
 
-- `price_data.product`: the SKU's `StripeProduct`.
+- `price_data.product`: the `StripeProduct` of the line's pricing.
 - `price_data.unit_amount_decimal`: `unitAmount`, in cents.
 - `price_data.tax_behavior`: `exclusive`, always.
 - `quantity_decimal`: `quantity`, so a prorated line can read
@@ -326,8 +334,14 @@ Each spec line becomes one Stripe invoice item on the invoice.
   which stripe-provider is upgraded to first. The source still decides
   whether a prorated line has a decimal quantity or 1 × its amount, so that
   [amounts match](#checking-amounts).
-- `description`: `description`. The SKU is on the Product, so it's no longer
-  in the name.
+- `description`: `description`, the price's display name. It's printed on
+  the invoice, so it never carries the SKU.
+
+**SKUs are internal.** They're for tracking and reporting, never printed on
+an invoice. A line's SKU goes on its metadata (`datum_sku`, taken from its
+pricing) and on its Product's metadata, where Stripe's reports and exports
+can group by it. Stripe Products have no SKU field of their own, and invoices
+don't print metadata.
 
 ### Service periods
 
@@ -388,12 +402,15 @@ the sum of the lines.
 - It calls `invoices.create_preview` with the customer, `automatic_tax`
   and the lines as `invoice_items` (up to 250), written exactly as for a real
   invoice.
-- It writes Stripe's lines, tax and totals into status, with
-  `Previewed=True`.
-- A customer without an address can be previewed with an address in the
-  spec, passed as `customer_details`.
-- The creator deletes it when done. A sweep deletes previews older than an
-  hour.
+- It writes Stripe's lines, discounts, tax and totals into status, with
+  `Ready=True` (reason `Previewed`), and `AmountsMatch` saying whether each
+  line came to its `amount`.
+- It waits, with `Ready=False`, for the account's `StripeCustomer` and each
+  line's `StripeProduct` to be ready.
+- Not built yet: a customer without an address, previewed with one in the
+  spec as `customer_details`. Today the account needs a Stripe customer.
+- It deletes itself an hour after it's created (`status.expiresAt`), so the
+  creator needn't.
 
 `purpose: PreviewDraft` creates a real draft for staff to open in the Stripe
 dashboard:
@@ -402,9 +419,15 @@ dashboard:
   never finalized. CEL refuses `finalize` on it.
 - Its metadata has `datum_purpose: PreviewDraft`, and its memo says it's a
   preview and not to send it.
-- `status.dashboardUrl` links to it.
-- It's deleted, with its Stripe draft, when its creator deletes it, or after
-  a day by a sweep.
+- `status.dashboardUrl` links to it, under the dashboard's test pages for a
+  test key.
+- Its lines are created on the draft itself, so none is left pending on the
+  customer for a real invoice to pick up. A draft made before a lost status
+  write is found by its UID in metadata and finished, not made again.
+- A finalizer deletes the Stripe draft with the `StripeInvoice`, which
+  deletes itself a day after it's created. A draft someone finalized in
+  Stripe can't be deleted: that's a `DraftNotDeleted` event, and the
+  `StripeInvoice` still goes.
 - openmeter-provider never projects drafts to `Invoice`s, and skips this
   metadata as well, so a preview draft can't reach the portals.
 
@@ -450,8 +473,8 @@ Previews have no PDF or hosted page in Stripe. The staff portal renders
   billing profile on it, switched at a billing boundary.
 - **Lines.** For each OpenMeter draft waiting on sync, build a
   `StripeInvoice`:
-  - each line's SKU, unit price, quantity and note from the pricing behind
-    its rate card key, and the contract's quantity;
+  - each line's pricing, unit price, quantity and note from the pricing
+    behind its rate card key, and the contract's quantity;
   - usage from OpenMeter's rated quantity and per-unit amount, one line per
     tier;
   - the period from OpenMeter's line;
@@ -498,7 +521,9 @@ Each phase ships on its own.
 5. **Charges staff add.** billing, openmeter-provider and staff-portal.
 6. **Production, account by account**, at billing boundaries: internal
    accounts, then contracts, then everyone else.
-7. **Retire SKUs in line names** in openmeter-provider.
+7. ~~Retire SKUs in line names~~: done early. SKUs are internal, so
+   openmeter-provider stopped putting them in line names before any
+   release carried them.
 
 ## Observability
 

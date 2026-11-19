@@ -6,3 +6,4 @@ resources:
   - bases/stripe.billing.miloapis.com_stripepaymentmethods.yaml
   - bases/stripe.billing.miloapis.com_stripecustomers.yaml
   - bases/stripe.billing.miloapis.com_stripeproducts.yaml
+  - bases/stripe.billing.miloapis.com_stripeinvoices.yaml
