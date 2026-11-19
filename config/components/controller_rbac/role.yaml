@@ -53,12 +53,31 @@ rules:
   - stripe.billing.miloapis.com
   resources:
   - stripecustomers/status
+  - stripeinvoices/status
   - stripepaymentmethods/status
   - stripeproducts/status
   - stripeproviderconfigs/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
+  - stripeinvoices
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
+  - stripeinvoices/finalizers
+  - stripepaymentmethods/finalizers
+  verbs:
   - update
 - apiGroups:
   - stripe.billing.miloapis.com
@@ -72,12 +91,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - stripe.billing.miloapis.com
-  resources:
-  - stripepaymentmethods/finalizers
-  verbs:
-  - update
 - apiGroups:
   - stripe.billing.miloapis.com
   resources:

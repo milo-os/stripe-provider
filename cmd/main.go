@@ -117,6 +117,12 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "name", "StripeProduct")
 		os.Exit(1)
 	}
+	// Invoice previews from Stripe, with tax: a preview, or a draft for
+	// staff to open in the dashboard.
+	if err = (&controller.StripeInvoiceReconciler{ProviderConfigName: providerConfigName}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "name", "StripeInvoice")
+		os.Exit(1)
+	}
 
 	// Register the Stripe webhook on the manager's shared webhook
 	// server (port webhookPort, TLS via webhookCertDir). Public

@@ -18,11 +18,14 @@ import (
 // not a long-lived process credential.
 type Client struct {
 	api *stripego.Client
+	// testMode is true for a test key, whose objects are under the
+	// dashboard's test pages.
+	testMode bool
 }
 
 // NewClient builds a Stripe API client.
 func NewClient(cfg *ResolvedConfig) *Client {
-	return &Client{api: stripego.NewClient(cfg.SecretKey)}
+	return &Client{api: stripego.NewClient(cfg.SecretKey), testMode: strings.Contains(cfg.SecretKey, "_test_")}
 }
 
 // CustomerDetails carries the BillingAccount-derived fields that
