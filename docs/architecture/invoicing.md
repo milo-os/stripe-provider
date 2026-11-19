@@ -405,6 +405,10 @@ the sum of the lines.
 - It writes Stripe's lines, discounts, tax and totals into status, with
   `Ready=True` (reason `Previewed`), and `AmountsMatch` saying whether each
   line came to its `amount`.
+- It also writes the customer's `startingBalance`, which Stripe carries
+  onto the invoice (positive for what they owe, such as an earlier invoice
+  below Stripe's minimum charge, negative for credit), and the `amountDue`
+  with it applied.
 - It waits, with `Ready=False`, for the account's `StripeCustomer` and each
   line's `StripeProduct` to be ready.
 - Not built yet: a customer without an address, previewed with one in the

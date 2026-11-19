@@ -156,6 +156,7 @@ var _ = Describe("StripeInvoice", func() {
 		}
 		stripe = &fakeInvoicer{result: stripeinternal.InvoiceResult{
 			ID: "upcoming_in_1", Subtotal: 49500, Discount: 4950, Tax: 0, Total: 44550,
+			StartingBalance: 23, AmountDue: 44573,
 			Lines: []stripeinternal.LineResult{{Key: "rack", Amount: 49500, Discount: 4950}},
 		}}
 		now = time.Now()
@@ -186,6 +187,8 @@ var _ = Describe("StripeInvoice", func() {
 		Expect(got.Status.Subtotal).To(Equal("495.00"))
 		Expect(got.Status.Discount).To(Equal("49.50"))
 		Expect(got.Status.Total).To(Equal("445.50"))
+		Expect(got.Status.StartingBalance).To(Equal("0.23"), "an earlier invoice below Stripe's minimum")
+		Expect(got.Status.AmountDue).To(Equal("445.73"))
 		Expect(got.Status.InvoiceID).To(BeEmpty(), "a preview creates nothing")
 		Expect(got.Status.Lines).To(ConsistOf(stripev1alpha1.StripeInvoiceLineStatus{
 			Key: "rack", Amount: "495.00", Discount: "49.50", Tax: "0.00",

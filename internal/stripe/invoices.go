@@ -81,7 +81,12 @@ type InvoiceResult struct {
 	Discount int64
 	Tax      int64
 	Total    int64
-	Lines    []LineResult
+	// StartingBalance is the customer's balance carried onto the invoice:
+	// positive for what they owe, negative for credit.
+	StartingBalance int64
+	// AmountDue is Total with the starting balance applied.
+	AmountDue int64
+	Lines     []LineResult
 }
 
 // LineResult is Stripe's amounts for one line, in minor units.
@@ -287,7 +292,10 @@ func (c *Client) lineKeys(ctx context.Context, id string) (map[string]bool, erro
 // invoiceResult reads Stripe's amounts. A preview holds only its first
 // lines inline, so the rest are listed.
 func (c *Client) invoiceResult(ctx context.Context, inv *stripego.Invoice) (*InvoiceResult, error) {
-	res := &InvoiceResult{ID: inv.ID, Status: string(inv.Status), Subtotal: inv.Subtotal, Total: inv.Total}
+	res := &InvoiceResult{
+		ID: inv.ID, Status: string(inv.Status), Subtotal: inv.Subtotal, Total: inv.Total,
+		StartingBalance: inv.StartingBalance, AmountDue: inv.AmountDue,
+	}
 	for _, t := range inv.TotalTaxes {
 		res.Tax += t.Amount
 	}
