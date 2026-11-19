@@ -326,7 +326,7 @@ Each spec line becomes one Stripe invoice item on the invoice.
 
 ### Products and prices
 
-- `price_data.product`: the SKU's `StripeProduct`.
+- `price_data.product`: the `StripeProduct` of the line's pricing.
 - `price_data.unit_amount_decimal`: `unitAmount`, in cents.
 - `price_data.tax_behavior`: `exclusive`, always.
 - `quantity_decimal`: `quantity`, so a prorated line can read
@@ -334,8 +334,14 @@ Each spec line becomes one Stripe invoice item on the invoice.
   which stripe-provider is upgraded to first. The source still decides
   whether a prorated line has a decimal quantity or 1 × its amount, so that
   [amounts match](#checking-amounts).
-- `description`: `description`. The SKU is on the Product, so it's no longer
-  in the name.
+- `description`: `description`, the price's display name. It's printed on
+  the invoice, so it never carries the SKU.
+
+**SKUs are internal.** They're for tracking and reporting, never printed on
+an invoice. A line's SKU goes on its metadata (`datum_sku`, taken from its
+pricing) and on its Product's metadata, where Stripe's reports and exports
+can group by it. Stripe Products have no SKU field of their own, and invoices
+don't print metadata.
 
 ### Service periods
 
@@ -467,8 +473,8 @@ Previews have no PDF or hosted page in Stripe. The staff portal renders
   billing profile on it, switched at a billing boundary.
 - **Lines.** For each OpenMeter draft waiting on sync, build a
   `StripeInvoice`:
-  - each line's SKU, unit price, quantity and note from the pricing behind
-    its rate card key, and the contract's quantity;
+  - each line's pricing, unit price, quantity and note from the pricing
+    behind its rate card key, and the contract's quantity;
   - usage from OpenMeter's rated quantity and per-unit amount, one line per
     tier;
   - the period from OpenMeter's line;
@@ -515,7 +521,9 @@ Each phase ships on its own.
 5. **Charges staff add.** billing, openmeter-provider and staff-portal.
 6. **Production, account by account**, at billing boundaries: internal
    accounts, then contracts, then everyone else.
-7. **Retire SKUs in line names** in openmeter-provider.
+7. ~~Retire SKUs in line names~~: done early. SKUs are internal, so
+   openmeter-provider stopped putting them in line names before any
+   release carried them.
 
 ## Observability
 

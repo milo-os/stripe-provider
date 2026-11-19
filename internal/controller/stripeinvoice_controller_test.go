@@ -200,6 +200,38 @@ var _ = Describe("StripeInvoice", func() {
 		Expect(stripe.previews).To(HaveLen(1))
 	})
 
+	It("keeps the pricing's SKU in the line's metadata, not its description", func() {
+		readyCustomer("cyberdyne")
+		sp := &billingv1alpha1.ServicePricing{
+			ObjectMeta: metav1.ObjectMeta{Name: "cabling-v1", Namespace: pricingNS},
+			Spec: billingv1alpha1.ServicePricingSpec{
+				ChargeType: billingv1alpha1.ChargeTypeRecurring, Currency: "USD", Amount: "330.00",
+				Interval: billingv1alpha1.ChargeIntervalMonthly, SKU: "DC-CAB-01",
+			},
+		}
+		Expect(k8sClient.Create(ctx, sp)).To(Succeed())
+		product := &stripev1alpha1.StripeProduct{
+			ObjectMeta: metav1.ObjectMeta{Name: stripeProductName(sp), Namespace: pricingNS},
+			Spec:       stripev1alpha1.StripeProductSpec{SKU: "DC-CAB-01"},
+		}
+		Expect(k8sClient.Create(ctx, product)).To(Succeed())
+		product.Status.ProductID = "datum_cabling"
+		apimeta.SetStatusCondition(&product.Status.Conditions, metav1.Condition{
+			Type: stripev1alpha1.StripeProductConditionReady, Status: metav1.ConditionTrue, Reason: "Synced",
+		})
+		Expect(k8sClient.Status().Update(ctx, product)).To(Succeed())
+
+		inv := invoice("with-sku", "cyberdyne", "cabling-v1", stripev1alpha1.StripeInvoicePurposePreview)
+		inv.Spec.Lines[0].Metadata = map[string]string{"billing_entitlement": "cyberdyne"}
+		Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+		_, err := reconcileInvoice(inv)
+		Expect(err).NotTo(HaveOccurred())
+
+		line := stripe.previews[0].Lines[0]
+		Expect(line.Description).To(Equal("Rack space"))
+		Expect(line.Metadata).To(Equal(map[string]string{"sku": "DC-CAB-01", "billing_entitlement": "cyberdyne"}))
+	})
+
 	It("reports a line Stripe doesn't come to", func() {
 		readyCustomer("globex")
 		readyProduct("rack-v2")

@@ -201,9 +201,18 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 		},
 	}
 	for _, l := range inv.Spec.Lines {
-		productID, waiting, err := r.lineProduct(ctx, l.ServicePricingRef)
+		productID, sku, waiting, err := r.lineProduct(ctx, l.ServicePricingRef)
 		if err != nil || waiting != nil {
 			return nil, waiting, err
+		}
+		metadata := l.Metadata
+		if sku != "" {
+			// The SKU is internal, for tracking and reporting: it goes on the
+			// line's metadata, never its description.
+			metadata = map[string]string{"sku": sku}
+			for k, v := range l.Metadata {
+				metadata[k] = v
+			}
 		}
 		line := stripeinternal.InvoiceLine{
 			Key:         l.Key,
@@ -214,7 +223,7 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 			Start:       l.Period.Start.Time,
 			End:         l.Period.End.Time,
 			Note:        l.Note,
-			Metadata:    l.Metadata,
+			Metadata:    metadata,
 		}
 		if t := l.Tax; t != nil {
 			switch {
@@ -232,8 +241,9 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 	return draft, nil, nil
 }
 
-// lineProduct is the Stripe Product of a pricing: its StripeProduct's.
-func (r *StripeInvoiceReconciler) lineProduct(ctx context.Context, ref stripev1alpha1.ServicePricingRef) (string, *waitReason, error) {
+// lineProduct is the Stripe Product of a pricing, its StripeProduct's, and
+// the pricing's SKU.
+func (r *StripeInvoiceReconciler) lineProduct(ctx context.Context, ref stripev1alpha1.ServicePricingRef) (string, string, *waitReason, error) {
 	ns := ref.Namespace
 	if ns == "" {
 		ns = billingv1alpha1.DefaultServicePricingNamespace
@@ -241,23 +251,23 @@ func (r *StripeInvoiceReconciler) lineProduct(ctx context.Context, ref stripev1a
 	var sp billingv1alpha1.ServicePricing
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &sp); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s/%s doesn't exist", ns, ref.Name)}, nil
+			return "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s/%s doesn't exist", ns, ref.Name)}, nil
 		}
-		return "", nil, fmt.Errorf("getting ServicePricing %s/%s: %w", ns, ref.Name, err)
+		return "", "", nil, fmt.Errorf("getting ServicePricing %s/%s: %w", ns, ref.Name, err)
 	}
 	var product stripev1alpha1.StripeProduct
 	name := stripeProductName(&sp)
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &product); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s has no StripeProduct yet", ref.Name)}, nil
+			return "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s has no StripeProduct yet", ref.Name)}, nil
 		}
-		return "", nil, fmt.Errorf("getting StripeProduct %s: %w", name, err)
+		return "", "", nil, fmt.Errorf("getting StripeProduct %s: %w", name, err)
 	}
 	if product.Status.ProductID == "" ||
 		!apimeta.IsStatusConditionTrue(product.Status.Conditions, stripev1alpha1.StripeProductConditionReady) {
-		return "", &waitReason{"WaitingForProduct", fmt.Sprintf("StripeProduct %s isn't ready", name)}, nil
+		return "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("StripeProduct %s isn't ready", name)}, nil
 	}
-	return product.Status.ProductID, nil, nil
+	return product.Status.ProductID, sp.Spec.SKU, nil, nil
 }
 
 // finalize deletes a PreviewDraft's Stripe draft, then lets the
