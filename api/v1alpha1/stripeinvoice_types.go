@@ -222,10 +222,23 @@ type StripeInvoiceStatus struct {
 	// +kubebuilder:validation:Optional
 	Tax string `json:"tax,omitempty"`
 
-	// Total is what the customer would pay.
+	// Total is the invoice's total: its lines after discounts, plus tax.
 	//
 	// +kubebuilder:validation:Optional
 	Total string `json:"total,omitempty"`
+
+	// StartingBalance is the customer's balance that Stripe carries onto
+	// the invoice: positive for what they already owe, such as an earlier
+	// invoice below Stripe's minimum charge, negative for credit.
+	//
+	// +kubebuilder:validation:Optional
+	StartingBalance string `json:"startingBalance,omitempty"`
+
+	// AmountDue is what the customer would be charged: Total with the
+	// starting balance applied.
+	//
+	// +kubebuilder:validation:Optional
+	AmountDue string `json:"amountDue,omitempty"`
 
 	// ExpiresAt is when the StripeInvoice deletes itself: an hour after
 	// it's created for a Preview, a day for a PreviewDraft, which takes

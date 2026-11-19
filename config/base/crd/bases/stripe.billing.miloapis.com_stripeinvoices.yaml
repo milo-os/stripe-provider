@@ -225,6 +225,11 @@ spec:
               StripeInvoiceStatus defines the observed state of a StripeInvoice.
               Amounts are decimal strings in the currency.
             properties:
+              amountDue:
+                description: |-
+                  AmountDue is what the customer would be charged: Total with the
+                  starting balance applied.
+                type: string
               conditions:
                 description: Conditions represent the latest available observations.
                 items:
@@ -335,6 +340,12 @@ spec:
                   controller.
                 format: int64
                 type: integer
+              startingBalance:
+                description: |-
+                  StartingBalance is the customer's balance that Stripe carries onto
+                  the invoice: positive for what they already owe, such as an earlier
+                  invoice below Stripe's minimum charge, negative for credit.
+                type: string
               subtotal:
                 description: Subtotal is the sum of the lines before discounts and
                   tax.
@@ -345,7 +356,8 @@ spec:
                   IDs and exemptions and each line's tax code.
                 type: string
               total:
-                description: Total is what the customer would pay.
+                description: 'Total is the invoice''s total: its lines after discounts,
+                  plus tax.'
                 type: string
             type: object
         type: object

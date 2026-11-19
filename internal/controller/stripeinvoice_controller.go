@@ -152,6 +152,8 @@ func (r *StripeInvoiceReconciler) Reconcile(ctx context.Context, req reconcile.R
 		s.Discount = majorUnits(result.Discount)
 		s.Tax = majorUnits(result.Tax)
 		s.Total = majorUnits(result.Total)
+		s.StartingBalance = majorUnits(result.StartingBalance)
+		s.AmountDue = majorUnits(result.AmountDue)
 		s.Lines = nil
 		for _, l := range result.Lines {
 			s.Lines = append(s.Lines, stripev1alpha1.StripeInvoiceLineStatus{

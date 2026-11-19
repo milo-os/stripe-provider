@@ -39,7 +39,7 @@ type fakeRequest struct {
 }
 
 const previewResponse = `{"id":"upcoming_in_1","object":"invoice","status":"draft","subtotal":63000,"total":61515,
-  "total_taxes":[{"amount":3465}],"total_discount_amounts":[{"amount":4950}],
+  "starting_balance":23,"amount_due":61538,"total_taxes":[{"amount":3465}],"total_discount_amounts":[{"amount":4950}],
   "lines":{"object":"list","has_more":false,"data":[
     {"id":"il_1","object":"line_item","amount":49500,"metadata":{"datum_line_key":"rack"},
      "discount_amounts":[{"amount":4950}],"taxes":[{"amount":3465}]},
@@ -181,6 +181,9 @@ func TestPreviewInvoice(t *testing.T) {
 
 	if res.Subtotal != 63000 || res.Discount != 4950 || res.Tax != 3465 || res.Total != 61515 {
 		t.Errorf("totals = %+v", res)
+	}
+	if res.StartingBalance != 23 || res.AmountDue != 61538 {
+		t.Errorf("starting balance %d, amount due %d", res.StartingBalance, res.AmountDue)
 	}
 	if len(res.Lines) != 2 || res.Lines[0] != (LineResult{Key: "rack", Amount: 49500, Discount: 4950, Tax: 3465}) ||
 		res.Lines[1].Key != "setup" {
