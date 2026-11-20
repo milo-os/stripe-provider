@@ -280,7 +280,12 @@ Reconciles `StripeInvoice`s with `purpose: Preview` or `PreviewDraft`. See
 
 ### Webhooks
 
-The webhook server today handles `setup_intent.*` only. It adds:
+The webhook server today handles `setup_intent.*`, and `invoice.sent` for
+the activity timeline: each time Stripe emails one of an account's
+invoices, whoever created it, it records `InvoiceSent` on the account's
+`BillingAccount` (see billing's
+[Stripe Invoice Activity](https://github.com/milo-os/billing/blob/main/docs/enhancements/stripe-invoice-activity.md)).
+That needs no `StripeInvoice`. For invoices it writes itself, it adds:
 
 | Event | Effect |
 |---|---|

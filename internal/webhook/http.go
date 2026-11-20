@@ -71,7 +71,8 @@ type Webhook struct {
 }
 
 // NewStripeWebhook wires the standard Stripe webhook: signature
-// verification + dedupe + dispatch on setup_intent.* events.
+// verification + dedupe + dispatch on setup_intent.* and invoice.sent
+// events.
 func NewStripeWebhook(c client.Client, providerConfigName string) *Webhook {
 	wh := &Webhook{
 		Client:             c,
@@ -196,6 +197,12 @@ func (wh *Webhook) dispatch(ctx context.Context, event *stripego.Event) Response
 	case "setup_intent.setup_failed", "setup_intent.canceled":
 		if err := wh.handleSetupIntentFailed(ctx, event); err != nil {
 			log.Error(err, "handling setup_intent failure", "id", event.ID, "type", event.Type)
+			return InternalServerErrorResponse()
+		}
+		return OkResponse()
+	case "invoice.sent":
+		if err := wh.handleInvoiceSent(ctx, event); err != nil {
+			log.Error(err, "handling invoice.sent", "id", event.ID)
 			return InternalServerErrorResponse()
 		}
 		return OkResponse()
