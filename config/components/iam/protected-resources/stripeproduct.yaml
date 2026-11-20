@@ -1,0 +1,24 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: stripe.billing.miloapis.com-stripeproduct
+spec:
+  serviceRef:
+    name: "stripe.billing.miloapis.com"
+  kind: StripeProduct
+  plural: stripeproducts
+  singular: stripeproduct
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - patch
+    - delete
+    - watch
+  subresources:
+    - name: status
+      permissions:
+        - get
+        - update
+        - patch
