@@ -55,9 +55,12 @@ settings on every line. See
 - **StripeInvoice controller** — has Stripe preview a `StripeInvoice`, or
   make it a draft for the dashboard, and deletes it, with its draft, once it
   expires.
-- **Webhook server** — receives Stripe `setup_intent.*` events on
-  `POST /webhooks/stripe`. Signature-verified via the per-class webhook
-  secret stored in the `Secret` referenced by `StripeProviderConfig`.
+- **Webhook server** — receives Stripe `setup_intent.*` and `invoice.sent`
+  events on `POST /webhooks/stripe`. Signature-verified via the per-class
+  webhook secret stored in the `Secret` referenced by `StripeProviderConfig`.
+  `invoice.sent` records an `InvoiceSent` Event on the billing account's
+  activity timeline each time Stripe emails an invoice; the endpoint has to
+  be subscribed to it in Stripe.
 
 ## Develop
 
