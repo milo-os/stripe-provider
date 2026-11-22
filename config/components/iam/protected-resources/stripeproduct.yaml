@@ -1,0 +1,29 @@
+# StripeProduct keeps the Stripe Product for one catalog SKU, owned by
+# the stripe-provider controller. Registering it as a ProtectedResource
+# puts its permissions in the authorization model; without it every
+# request for stripeproducts is refused as "permission not found",
+# whatever role the caller holds.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: stripe.billing.miloapis.com-stripeproduct
+spec:
+  serviceRef:
+    name: "stripe.billing.miloapis.com"
+  kind: StripeProduct
+  plural: stripeproducts
+  singular: stripeproduct
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - patch
+    - delete
+    - watch
+  subresources:
+    - name: status
+      permissions:
+        - get
+        - update
+        - patch

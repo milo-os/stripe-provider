@@ -1,0 +1,29 @@
+# StripeInvoice mirrors a billing Invoice into Stripe and reports its
+# Stripe state back, owned by the stripe-provider controller.
+# Registering it as a ProtectedResource puts its permissions in the
+# authorization model; without it every request for stripeinvoices
+# is refused as "permission not found", whatever role the caller holds.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: stripe.billing.miloapis.com-stripeinvoice
+spec:
+  serviceRef:
+    name: "stripe.billing.miloapis.com"
+  kind: StripeInvoice
+  plural: stripeinvoices
+  singular: stripeinvoice
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - patch
+    - delete
+    - watch
+  subresources:
+    - name: status
+      permissions:
+        - get
+        - update
+        - patch
