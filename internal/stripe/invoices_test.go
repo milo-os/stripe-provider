@@ -78,6 +78,14 @@ func (f *fakeInvoices) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(f.lines))
 	case r.URL.Path == "/v1/invoiceitems":
 		_, _ = w.Write([]byte(`{"id":"ii_1","object":"invoiceitem"}`))
+	case strings.HasPrefix(r.URL.Path, "/v1/invoiceitems/") && r.Method == http.MethodDelete:
+		_, _ = w.Write([]byte(`{"id":"x","object":"invoiceitem","deleted":true}`))
+	case r.URL.Path == "/v1/invoices/in_1/finalize":
+		_, _ = w.Write([]byte(`{"id":"in_1","object":"invoice","status":"open","number":"DATUM-0042",
+		  "hosted_invoice_url":"https://invoice.stripe.com/i/in_1","amount_remaining":63000,
+		  "status_transitions":{"finalized_at":1796083200}}`))
+	case r.URL.Path == "/v1/invoices/in_1" && r.Method == http.MethodPost:
+		_, _ = w.Write([]byte(`{"id":"in_1","object":"invoice","status":"draft"}`))
 	case r.URL.Path == "/v1/invoices/in_1" && r.Method == http.MethodGet:
 		if f.invoice == "" {
 			missing()
@@ -237,8 +245,107 @@ func TestEnsureDraftInvoice_CreatesTheDraftWithItsLines(t *testing.T) {
 			t.Errorf("item not on the draft: %v", item.form)
 		}
 	}
-	if items[0].idempotency != "stripeinvoice-uid-1-line-rack" {
-		t.Errorf("item idempotency key = %q", items[0].idempotency)
+	if !strings.HasPrefix(items[0].idempotency, "stripeinvoice-uid-1-line-rack-") {
+		t.Errorf("item idempotency key = %q, want the line's key and hash", items[0].idempotency)
+	}
+	if items[0].form.Get("metadata[datum_line_hash]") == "" {
+		t.Errorf("item has no line hash: %v", items[0].form)
+	}
+}
+
+func invoiceDraft() InvoiceDraft {
+	d := rackDraft()
+	d.Description = ""
+	d.Metadata = map[string]string{MetadataStripeInvoiceUID: "uid-1", MetadataPurpose: "Invoice"}
+	d.CollectionMethod = CollectionSendInvoice
+	d.DaysUntilDue = 45
+	return d
+}
+
+func TestEnsureDraftInvoice_SendsAnInvoiceOnPaymentTerms(t *testing.T) {
+	f := &fakeInvoices{
+		coupons: map[string]bool{"datum-pct-10": true},
+		drafts:  `{"object":"list","data":[],"has_more":false}`,
+		lines:   `{"object":"list","data":[],"has_more":false}`,
+		invoice: `{"id":"in_1","object":"invoice","status":"draft","collection_method":"send_invoice","created":1796083200,"due_date":1799971200}`,
+	}
+	if _, err := newInvoicesClient(t, f).EnsureDraftInvoice(context.Background(), "", invoiceDraft()); err != nil {
+		t.Fatalf("EnsureDraftInvoice: %v", err)
+	}
+	create := f.find(http.MethodPost, "/v1/invoices")[0]
+	if create.form.Get("collection_method") != "send_invoice" || create.form.Get("days_until_due") != "45" {
+		t.Errorf("collection = %q due in %q days, want send_invoice in 45", create.form.Get("collection_method"), create.form.Get("days_until_due"))
+	}
+	if create.form.Has("description") {
+		t.Errorf("a real invoice has no preview memo: %q", create.form.Get("description"))
+	}
+	if n := len(f.find(http.MethodPost, "/v1/invoices/in_1")); n != 0 {
+		t.Errorf("collection already right, but updated %d times", n)
+	}
+}
+
+func TestEnsureDraftInvoice_RewritesChangedLinesAndRemovesOldOnes(t *testing.T) {
+	d := invoiceDraft()
+	rackHash := d.Lines[0].hash()
+	f := &fakeInvoices{
+		coupons: map[string]bool{"datum-pct-10": true},
+		lines: `{"object":"list","has_more":false,"data":[
+		  {"id":"il_1","object":"line_item","metadata":{"datum_line_key":"rack","datum_line_hash":"` + rackHash + `"},
+		   "parent":{"type":"invoice_item_details","invoice_item_details":{"invoice_item":"ii_rack"}}},
+		  {"id":"il_2","object":"line_item","metadata":{"datum_line_key":"setup","datum_line_hash":"stale"},
+		   "parent":{"type":"invoice_item_details","invoice_item_details":{"invoice_item":"ii_setup"}}},
+		  {"id":"il_3","object":"line_item","metadata":{"datum_line_key":"gone","datum_line_hash":"x"},
+		   "parent":{"type":"invoice_item_details","invoice_item_details":{"invoice_item":"ii_gone"}}}]}`,
+		invoice: `{"id":"in_1","object":"invoice","status":"draft","collection_method":"charge_automatically"}`,
+	}
+	if _, err := newInvoicesClient(t, f).EnsureDraftInvoice(context.Background(), "in_1", d); err != nil {
+		t.Fatalf("EnsureDraftInvoice: %v", err)
+	}
+	var deleted []string
+	for _, r := range f.requests {
+		if r.method == http.MethodDelete {
+			deleted = append(deleted, r.path)
+		}
+	}
+	if strings.Join(deleted, ",") != "/v1/invoiceitems/ii_setup,/v1/invoiceitems/ii_gone" {
+		t.Errorf("deleted %v, want the changed and the removed line", deleted)
+	}
+	items := f.find(http.MethodPost, "/v1/invoiceitems")
+	if len(items) != 1 || items[0].form.Get("metadata[datum_line_key]") != "setup" {
+		t.Errorf("want only the changed line written again, got %v", items)
+	}
+	update := f.find(http.MethodPost, "/v1/invoices/in_1")
+	if len(update) != 1 || update[0].form.Get("collection_method") != "send_invoice" || update[0].form.Get("days_until_due") != "45" {
+		t.Errorf("collection not moved to payment terms: %v", update)
+	}
+}
+
+func TestFinalizeInvoice(t *testing.T) {
+	f := &fakeInvoices{invoice: `{"id":"in_1","object":"invoice","status":"draft"}`}
+	res, err := newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1", "stripeinvoice-uid-1")
+	if err != nil {
+		t.Fatalf("FinalizeInvoice: %v", err)
+	}
+	calls := f.find(http.MethodPost, "/v1/invoices/in_1/finalize")
+	if len(calls) != 1 || calls[0].form.Get("auto_advance") != "true" {
+		t.Fatalf("finalize calls = %v, want one with auto_advance so Stripe charges or sends it", calls)
+	}
+	if res.Status != "open" || res.Number != "DATUM-0042" || res.HostedInvoiceURL == "" || res.FinalizedAt.IsZero() {
+		t.Errorf("result = %+v", res)
+	}
+
+	// Already finalized: just read.
+	f = &fakeInvoices{invoice: `{"id":"in_1","object":"invoice","status":"paid","number":"DATUM-0042"}`}
+	res, err = newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1", "stripeinvoice-uid-1")
+	if err != nil || res.Status != "paid" || len(f.find(http.MethodPost, "/v1/invoices/in_1/finalize")) != 0 {
+		t.Errorf("finalizing a paid invoice: %+v, %v", res, err)
+	}
+}
+
+func TestRetrieveInvoice_Missing(t *testing.T) {
+	_, err := newInvoicesClient(t, &fakeInvoices{}).RetrieveInvoice(context.Background(), "in_1")
+	if !errors.Is(err, ErrInvoiceMissing) {
+		t.Errorf("err = %v, want ErrInvoiceMissing", err)
 	}
 }
 

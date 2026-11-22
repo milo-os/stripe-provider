@@ -23,7 +23,7 @@ in the billing repo for the full design.
 | `StripePaymentMethod` | Namespace | Provider-owned state for a single `PaymentMethod`. Child of the parent `PaymentMethod` via `ownerReference`. |
 | `StripeCustomer` | Namespace | The Stripe `Customer` for a `BillingAccount`, named after it and owned by it. `status.stripeCustomerId` is what invoicing providers bill, so an account with payment terms can be invoiced without a card. |
 | `StripeProduct` | Namespace | The Stripe `Product` for one SKU of the catalog (or one list `ServicePricing` without a SKU), named and taxed as its newest list pricing. Invoice lines name it. See [`docs/architecture/invoicing.md`](docs/architecture/invoicing.md#stripeproduct). |
-| `StripeInvoice` | Namespace | An invoice for Stripe to work out, as lines with a Product, quantity, unit price, service period and tax. For now it previews: Stripe's preview with nothing created, or a draft for staff to open in the dashboard, deleted after a day. See [`docs/architecture/invoicing.md`](docs/architecture/invoicing.md#previews). |
+| `StripeInvoice` | Namespace | An invoice for Stripe to work out, as lines with a Product, quantity, unit price, service period and tax. It previews (Stripe's preview with nothing created, or a draft for staff to open in the dashboard, deleted after a day) or writes a real invoice: a draft kept in step with its lines, finalized on request, its payment state read from Stripe. See [`docs/architecture/invoicing.md`](docs/architecture/invoicing.md#invoice-controller). |
 
 ## Invoicing
 
@@ -54,13 +54,18 @@ settings on every line. See
   code and active flag in step with the newest list pricing.
 - **StripeInvoice controller** — has Stripe preview a `StripeInvoice`, or
   make it a draft for the dashboard, and deletes it, with its draft, once it
-  expires.
+  expires. For a real invoice (`purpose: Invoice`) it keeps a Stripe draft in
+  step with the lines, finalizes it when `spec.finalize` is set, and reads
+  its state from Stripe until it's paid or void.
 - **Webhook server** — receives Stripe `setup_intent.*` and `invoice.sent`
   events on `POST /webhooks/stripe`. Signature-verified via the per-class
   webhook secret stored in the `Secret` referenced by `StripeProviderConfig`.
   `invoice.sent` records an `InvoiceSent` Event on the billing account's
-  activity timeline each time Stripe emails an invoice; the endpoint has to
-  be subscribed to it in Stripe.
+  activity timeline each time Stripe emails an invoice. `invoice.finalized`,
+  `invoice.paid`, `invoice.payment_failed`, `invoice.payment_succeeded`,
+  `invoice.voided`, `invoice.marked_uncollectible`, `invoice.deleted` and
+  `invoice.updated` have a real invoice's `StripeInvoice` read again. The
+  endpoint has to be subscribed to each of them in Stripe.
 
 ## Develop
 

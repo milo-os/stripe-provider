@@ -8,7 +8,7 @@ import (
 
 // StripeInvoicePurpose says what a StripeInvoice is for.
 //
-// +kubebuilder:validation:Enum=Preview;PreviewDraft
+// +kubebuilder:validation:Enum=Preview;PreviewDraft;Invoice
 type StripeInvoicePurpose string
 
 const (
@@ -19,6 +19,25 @@ const (
 	// customer, for staff to open in the Stripe dashboard. It's never
 	// finalized or sent, and it's deleted with the StripeInvoice.
 	StripeInvoicePurposePreviewDraft StripeInvoicePurpose = "PreviewDraft"
+	// StripeInvoicePurposeInvoice is a real invoice. Its draft is kept in
+	// step with the lines until spec.finalize, then finalized, and Stripe
+	// charges or sends it by the account's payment arrangement.
+	StripeInvoicePurposeInvoice StripeInvoicePurpose = "Invoice"
+)
+
+// StripeInvoiceState is where a real invoice stands in Stripe.
+//
+// +kubebuilder:validation:Enum=Draft;Open;Paid;Void;Uncollectible;Deleted
+type StripeInvoiceState string
+
+const (
+	StripeInvoiceStateDraft         StripeInvoiceState = "Draft"
+	StripeInvoiceStateOpen          StripeInvoiceState = "Open"
+	StripeInvoiceStatePaid          StripeInvoiceState = "Paid"
+	StripeInvoiceStateVoid          StripeInvoiceState = "Void"
+	StripeInvoiceStateUncollectible StripeInvoiceState = "Uncollectible"
+	// StripeInvoiceStateDeleted is a draft someone deleted in Stripe.
+	StripeInvoiceStateDeleted StripeInvoiceState = "Deleted"
 )
 
 const (
@@ -30,11 +49,26 @@ const (
 	// a line, before discounts, differs from the line's amount: its
 	// quantity times unit price doesn't come to it.
 	StripeInvoiceConditionAmountsMatch = "AmountsMatch"
+	// StripeInvoiceConditionSynced is True when a real invoice's Stripe
+	// draft holds exactly the spec's lines and their amounts match. Reasons:
+	// Synced, WaitingForCustomer, WaitingForProduct, AmountsDiffer,
+	// StripeError, Finalized (the lines can no longer change).
+	StripeInvoiceConditionSynced = "Synced"
+	// StripeInvoiceConditionFinalized is True once Stripe has finalized a
+	// real invoice: it has its number and is being charged or sent.
+	StripeInvoiceConditionFinalized = "Finalized"
+	// StripeInvoiceConditionPaymentFailed is True after Stripe's last
+	// attempt to charge the invoice failed, with Stripe's reason, until it's
+	// paid.
+	StripeInvoiceConditionPaymentFailed = "PaymentFailed"
 )
 
 // StripeInvoiceSpec defines the desired state of a StripeInvoice.
 //
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; create a new StripeInvoice"
+// +kubebuilder:validation:XValidation:rule="oldSelf.purpose == 'Invoice' || self == oldSelf",message="a preview's spec is immutable; create a new StripeInvoice"
+// +kubebuilder:validation:XValidation:rule="self.purpose == oldSelf.purpose && self.billingAccountRef == oldSelf.billingAccountRef",message="purpose and billingAccountRef can't change"
+// +kubebuilder:validation:XValidation:rule="!has(self.finalize) || !self.finalize || self.purpose == 'Invoice'",message="only an Invoice can be finalized"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.finalize) || !oldSelf.finalize || self == oldSelf",message="the spec is immutable once finalize is true"
 type StripeInvoiceSpec struct {
 	// BillingAccountRef names the BillingAccount, in this namespace, whose
 	// Stripe customer is invoiced. Its StripeCustomer must be Ready.
@@ -42,7 +76,7 @@ type StripeInvoiceSpec struct {
 	// +kubebuilder:validation:Required
 	BillingAccountRef BillingAccountLocalRef `json:"billingAccountRef"`
 
-	// Purpose is Preview or PreviewDraft.
+	// Purpose is Preview, PreviewDraft or Invoice.
 	//
 	// +kubebuilder:validation:Required
 	Purpose StripeInvoicePurpose `json:"purpose"`
@@ -62,6 +96,44 @@ type StripeInvoiceSpec struct {
 	// +listType=map
 	// +listMapKey=key
 	Lines []StripeInvoiceLine `json:"lines"`
+
+	// Source is where a real invoice came from. Its ID goes on the Stripe
+	// invoice's metadata, so the source's own records find it.
+	//
+	// +kubebuilder:validation:Optional
+	Source *StripeInvoiceSource `json:"source,omitempty"`
+
+	// Finalize, on an Invoice, finalizes it in Stripe once it's synced.
+	// Stripe then charges the default payment method, or sends the invoice
+	// for an account on payment terms. It can't be undone, and the lines
+	// can't change after it.
+	//
+	// +kubebuilder:validation:Optional
+	Finalize bool `json:"finalize,omitempty"`
+}
+
+// StripeInvoiceSourceSystem names the system that made an invoice.
+//
+// +kubebuilder:validation:Enum=OpenMeter
+type StripeInvoiceSourceSystem string
+
+// StripeInvoiceSourceOpenMeter is an invoice OpenMeter assembled. Its ID is
+// written to the Stripe invoice's "om_invoice_id" metadata.
+const StripeInvoiceSourceOpenMeter StripeInvoiceSourceSystem = "OpenMeter"
+
+// StripeInvoiceSource is where an invoice came from.
+type StripeInvoiceSource struct {
+	// System is the source.
+	//
+	// +kubebuilder:validation:Required
+	System StripeInvoiceSourceSystem `json:"system"`
+
+	// InvoiceID is the source's ID for the invoice.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	InvoiceID string `json:"invoiceId"`
 }
 
 // StripeInvoiceLine is one charge: an invoice item in Stripe.
@@ -188,8 +260,8 @@ type StripeInvoiceLineTax struct {
 // StripeInvoiceStatus defines the observed state of a StripeInvoice.
 // Amounts are decimal strings in the currency.
 type StripeInvoiceStatus struct {
-	// InvoiceID is the Stripe invoice: the draft for PreviewDraft. A
-	// Preview creates nothing, so it has none.
+	// InvoiceID is the Stripe invoice: the draft for PreviewDraft, the
+	// invoice for Invoice. A Preview creates nothing, so it has none.
 	//
 	// +kubebuilder:validation:Optional
 	InvoiceID string `json:"invoiceId,omitempty"`
@@ -198,6 +270,54 @@ type StripeInvoiceStatus struct {
 	//
 	// +kubebuilder:validation:Optional
 	DashboardURL string `json:"dashboardUrl,omitempty"`
+
+	// State is where an Invoice stands in Stripe.
+	//
+	// +kubebuilder:validation:Optional
+	State StripeInvoiceState `json:"state,omitempty"`
+
+	// Number is the number Stripe gives an Invoice when it's finalized,
+	// such as "DATUM-0042".
+	//
+	// +kubebuilder:validation:Optional
+	Number string `json:"number,omitempty"`
+
+	// HostedInvoiceURL is the invoice's page in Stripe, where the customer
+	// reads, downloads and pays it. Set once it's finalized.
+	//
+	// +kubebuilder:validation:Optional
+	HostedInvoiceURL string `json:"hostedInvoiceUrl,omitempty"`
+
+	// FinalizedAt is when Stripe finalized the invoice.
+	//
+	// +kubebuilder:validation:Optional
+	FinalizedAt *metav1.Time `json:"finalizedAt,omitempty"`
+
+	// DueDate is when payment is due, for an invoice that's sent.
+	//
+	// +kubebuilder:validation:Optional
+	DueDate *metav1.Time `json:"dueDate,omitempty"`
+
+	// PaidAt is when the invoice was paid.
+	//
+	// +kubebuilder:validation:Optional
+	PaidAt *metav1.Time `json:"paidAt,omitempty"`
+
+	// AmountPaid is what's been paid so far.
+	//
+	// +kubebuilder:validation:Optional
+	AmountPaid string `json:"amountPaid,omitempty"`
+
+	// AmountRemaining is what's still owed.
+	//
+	// +kubebuilder:validation:Optional
+	AmountRemaining string `json:"amountRemaining,omitempty"`
+
+	// LinesHash is a hash of the spec lines last written to Stripe, so a
+	// change to them is seen.
+	//
+	// +kubebuilder:validation:Optional
+	LinesHash string `json:"linesHash,omitempty"`
 
 	// Lines are Stripe's amounts for each spec line, by key.
 	//
@@ -242,7 +362,7 @@ type StripeInvoiceStatus struct {
 
 	// ExpiresAt is when the StripeInvoice deletes itself: an hour after
 	// it's created for a Preview, a day for a PreviewDraft, which takes
-	// its draft with it.
+	// its draft with it. An Invoice never expires.
 	//
 	// +kubebuilder:validation:Optional
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
@@ -267,6 +387,8 @@ type StripeInvoiceLineStatus struct {
 	//
 	// +kubebuilder:validation:Required
 	Key string `json:"key"`
+	// InvoiceItemID is the Stripe invoice item behind the line.
+	InvoiceItemID string `json:"invoiceItemId,omitempty"`
 	// Amount is Stripe's amount for the line, before discounts and tax.
 	Amount string `json:"amount,omitempty"`
 	// Discount is the line's discount.
@@ -278,11 +400,12 @@ type StripeInvoiceLineStatus struct {
 // StripeInvoice is the Schema for the stripeinvoices API.
 //
 // A StripeInvoice is an invoice for Stripe to work out, as lines with a
-// Product, quantity, unit price, service period and tax. For now it only
-// previews: Stripe's own preview with nothing created, or a draft that
-// staff open in the Stripe dashboard and that's deleted after a day. Both
-// use the same lines a real invoice will, so a preview can't drift from
-// what's billed.
+// Product, quantity, unit price, service period and tax. It previews
+// (Stripe's own preview with nothing created, or a draft that staff open in
+// the Stripe dashboard and that's deleted after a day) or writes a real
+// invoice: a draft kept in step with the lines, finalized on request, whose
+// payment Stripe's events keep current. Previews and invoices share the same
+// lines, so a preview can't drift from what's billed.
 //
 // Other controllers create StripeInvoices, in the billing account's
 // namespace; staff don't. See docs/architecture/invoicing.md.
@@ -291,6 +414,8 @@ type StripeInvoiceLineStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="BillingAccount",type=string,JSONPath=`.spec.billingAccountRef.name`
 // +kubebuilder:printcolumn:name="Purpose",type=string,JSONPath=`.spec.purpose`
+// +kubebuilder:printcolumn:name="Number",type=string,JSONPath=`.status.number`
+// +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="Total",type=string,JSONPath=`.status.total`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
