@@ -6,3 +6,5 @@ resources:
   - stripeproviderconfig.yaml
   - stripepaymentmethod.yaml
   - stripecustomer.yaml
+  - stripeinvoice.yaml
+  - stripeproduct.yaml
