@@ -428,6 +428,7 @@ var _ = Describe("StripeInvoice", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stripe.drafts).To(HaveLen(2))
 			Expect(stripe.drafts[1].Lines[0].Quantity.String()).To(Equal("2"))
+			Expect(stripe.drafts[1].Revision).NotTo(Equal(stripe.drafts[0].Revision), "a rewrite isn't a retry")
 			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Status).To(Equal(metav1.ConditionTrue))
 
 			got = get(inv)
@@ -435,6 +436,7 @@ var _ = Describe("StripeInvoice", func() {
 			Expect(k8sClient.Update(ctx, got)).To(Succeed())
 			res, err = reconcileInvoice(inv)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts).To(HaveLen(3), "the draft is checked again just before it's finalized")
 			Expect(stripe.finalized).To(Equal([]string{"in_draft"}))
 			Expect(res.RequeueAfter).To(Equal(invoiceRefreshInterval))
 			got = get(inv)
@@ -454,7 +456,7 @@ var _ = Describe("StripeInvoice", func() {
 			Expect(got.Status.State).To(Equal(stripev1alpha1.StripeInvoiceStatePaid))
 			Expect(got.Status.PaidAt).NotTo(BeNil())
 			Expect(got.Status.AmountRemaining).To(Equal("0.00"))
-			Expect(stripe.drafts).To(HaveLen(2), "a finalized invoice's lines are never written again")
+			Expect(stripe.drafts).To(HaveLen(3), "a finalized invoice's lines are never written again")
 			Expect(stripe.finalized).To(HaveLen(1))
 
 			// Deleting it leaves the bill in Stripe alone.
@@ -499,6 +501,28 @@ var _ = Describe("StripeInvoice", func() {
 			cond := condition(inv, stripev1alpha1.StripeInvoiceConditionSynced)
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("AmountsDiffer"))
+			Expect(stripe.finalized).To(BeEmpty())
+		})
+
+		It("doesn't finalize a draft that changed in Stripe after it was synced", func() {
+			readyCustomer("massive")
+			readyProduct("rack-w6")
+			inv := realInvoice("tampered", "massive", "rack-w6")
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+			_, err := reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Status).To(Equal(metav1.ConditionTrue))
+
+			// Someone edits the draft in the Stripe dashboard, and the
+			// rewrite can't put it right.
+			stripe.result.Lines[0].Amount = 49499
+			got := get(inv)
+			got.Spec.Finalize = true
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			_, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts).To(HaveLen(2))
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Reason).To(Equal("AmountsDiffer"))
 			Expect(stripe.finalized).To(BeEmpty())
 		})
 

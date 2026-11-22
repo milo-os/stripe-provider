@@ -273,7 +273,11 @@ Reconciles `StripeInvoice`s with `purpose: Invoice`. On each pass:
    status.
 5. **Check amounts.** See [Checking amounts](#checking-amounts). `Synced`
    becomes True only when they match.
-6. **Finalize** when `spec.finalize` is true and `Synced` is True: finalize
+6. **Finalize** when `spec.finalize` is true. Steps 3 to 5 run once more
+   first, even if the spec hasn't changed, so an item someone added to or
+   removed from the draft in the Stripe dashboard is put right rather than
+   billed; an item without a current `datum_line_key` is deleted. If
+   `Synced` is True after that, finalize
    the invoice with `auto_advance: true`, then record `number`,
    `hostedInvoiceUrl` and `Finalized=True`. Stripe then charges the default
    payment method or sends the invoice, by its collection method.
@@ -469,9 +473,17 @@ Previews have no PDF or hosted page in Stripe. The staff portal renders
   plus `create`. `status.invoiceId` is written straight after. If the write
   is lost, the next pass lists the customer's draft invoices and adopts the
   one whose `datum_stripe_invoice` metadata names this resource.
-- **Creating a line.** The key is the UID, the line key and the spec
-  generation. Lines are matched to items by `datum_line_key`, so a retried
-  pass updates rather than duplicates.
+- **Creating a line.** The key is the UID, the line key, the spec
+  generation and the line's hash. Lines are matched to items by
+  `datum_line_key`, so a retried pass updates rather than duplicates. The
+  generation is there because Stripe replays a reused key for 24 hours with
+  the item it first created, even if that item has since been deleted: a
+  line removed and added back unchanged, which is a new generation, gets a
+  new key and is written again. An item someone deletes in the Stripe
+  dashboard is the one case a reused key can't fix: within the same
+  generation and 24 hours, the line stays missing, `Synced` stays False on
+  `AmountsDiffer`, and the invoice isn't finalized until the key expires or
+  the spec changes.
 - **Finalizing** is safe to repeat: Stripe refuses to finalize twice, and the
   controller reads the state back.
 - **Stripe errors.** Rate limits and 5xx requeue with backoff. A 4xx sets a

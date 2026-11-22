@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -201,6 +202,7 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 		CustomerID:     customer.Status.StripeCustomerID,
 		Currency:       currency,
 		IdempotencyKey: "stripeinvoice-" + string(inv.UID),
+		Revision:       strconv.FormatInt(inv.Generation, 10),
 		Metadata: map[string]string{
 			stripeinternal.MetadataStripeInvoice:    inv.Namespace + "/" + inv.Name,
 			stripeinternal.MetadataStripeInvoiceUID: string(inv.UID),

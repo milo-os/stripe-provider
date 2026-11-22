@@ -262,6 +262,33 @@ func invoiceDraft() InvoiceDraft {
 	return d
 }
 
+func TestEnsureDraftInvoice_WritesALineAddedBackAgain(t *testing.T) {
+	// The rack line was written at revision 1, removed at 2 and is back,
+	// unchanged, at 3. Stripe would replay a reused key with the item it
+	// already deleted, so the key has to be new.
+	keys := map[string]bool{}
+	for _, rev := range []string{"1", "3", "3"} {
+		f := &fakeInvoices{
+			coupons: map[string]bool{"datum-pct-10": true},
+			lines:   `{"object":"list","data":[],"has_more":false}`,
+			invoice: `{"id":"in_1","object":"invoice","status":"draft","collection_method":"charge_automatically"}`,
+		}
+		d := rackDraft()
+		d.Revision = rev
+		if _, err := newInvoicesClient(t, f).EnsureDraftInvoice(context.Background(), "in_1", d); err != nil {
+			t.Fatalf("EnsureDraftInvoice: %v", err)
+		}
+		for _, item := range f.find(http.MethodPost, "/v1/invoiceitems") {
+			if item.form.Get("metadata[datum_line_key]") == "rack" {
+				keys[item.idempotency] = true
+			}
+		}
+	}
+	if len(keys) != 2 {
+		t.Errorf("want one key per revision, so a retry reuses it and a re-add doesn't; got %v", keys)
+	}
+}
+
 func TestEnsureDraftInvoice_SendsAnInvoiceOnPaymentTerms(t *testing.T) {
 	f := &fakeInvoices{
 		coupons: map[string]bool{"datum-pct-10": true},

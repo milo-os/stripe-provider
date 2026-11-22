@@ -49,7 +49,10 @@ func (r *StripeInvoiceReconciler) reconcileInvoice(ctx context.Context, inv *str
 	}
 
 	if !invoiceFinalized(inv) && inv.Status.State != stripev1alpha1.StripeInvoiceStateDeleted {
-		if needsSync(inv) {
+		// The draft is written again just before it's finalized, even if
+		// nothing changed here, so a line someone added or removed in the
+		// Stripe dashboard is put right rather than billed.
+		if needsSync(inv) || inv.Spec.Finalize {
 			result, waiting, err := r.syncInvoice(ctx, inv, stripe)
 			if waiting != nil {
 				return ctrl.Result{RequeueAfter: stripeInvoiceWaitRequeue}, r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) {

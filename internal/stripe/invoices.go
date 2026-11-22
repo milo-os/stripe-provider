@@ -66,6 +66,11 @@ type InvoiceDraft struct {
 	// IdempotencyKey prefixes the idempotency keys of the writes, so a
 	// retried create is the same create.
 	IdempotencyKey string
+	// Revision is the source's version of the lines, such as its
+	// generation. It's in each line's idempotency key, so a line removed
+	// and later added back, unchanged, is written again rather than
+	// replayed by Stripe as the item it already deleted.
+	Revision string
 	// CollectionMethod is CollectionChargeAutomatically (the default) or
 	// CollectionSendInvoice.
 	CollectionMethod string
@@ -331,9 +336,10 @@ func (c *Client) syncLines(ctx context.Context, id string, d InvoiceDraft) error
 			}
 			item.Discounts = []*stripego.InvoiceItemCreateDiscountParams{{Coupon: stripego.String(coupon)}}
 		}
-		// The hash is in the key, so a line rewritten after a change isn't
-		// mistaken for a retry of its old self.
-		item.SetIdempotencyKey(d.IdempotencyKey + "-line-" + l.Key + "-" + l.hash())
+		// The revision and hash are in the key, so a line written again,
+		// after a change or after being removed and added back, isn't
+		// mistaken by Stripe for a retry of an earlier write.
+		item.SetIdempotencyKey(d.IdempotencyKey + "-line-" + l.Key + "-r" + d.Revision + "-" + l.hash())
 		if _, err := c.api.V1InvoiceItems.Create(ctx, item); err != nil {
 			return fmt.Errorf("adding line %q to Stripe draft %s: %w", l.Key, id, err)
 		}
