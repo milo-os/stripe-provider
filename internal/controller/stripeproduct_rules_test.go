@@ -96,11 +96,22 @@ func TestDesiredProduct(t *testing.T) {
 		}
 	})
 
+	t.Run("the newest list pricing describes it", func(t *testing.T) {
+		v1 := rulesPricing("cabling-v1", "DC-CAB-01", "", "Cabling", day(1), nil)
+		v1.Spec.Description = "Cabling"
+		v2 := rulesPricing("cabling-v2", "DC-CAB-01", "", "Structured cabling", day(10), nil)
+		v2.Spec.Description = "Structured cabling within a cage"
+		got := desiredProduct(product, []billingv1alpha1.ServicePricing{v1, v2})
+		if got.description == nil || *got.description != "Structured cabling within a cage" {
+			t.Errorf("description = %v", got.description)
+		}
+	})
+
 	t.Run("with no pricings left it's archived as it was", func(t *testing.T) {
 		archived := product.DeepCopy()
 		archived.Status.Name, archived.Status.TaxCode = "Structured cabling", "txcd_20030000"
 		got := desiredProduct(archived, nil)
-		if got.active || got.name != "Structured cabling" || got.taxCode != "txcd_20030000" {
+		if got.active || got.name != "Structured cabling" || got.taxCode != "txcd_20030000" || got.description != nil {
 			t.Errorf("got %+v", got)
 		}
 	})

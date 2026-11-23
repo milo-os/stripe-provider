@@ -163,3 +163,40 @@ func TestEnsureProduct_AdoptsTheProductALostCreateMade(t *testing.T) {
 		t.Errorf("update = %v", f.updates[0])
 	}
 }
+
+func TestEnsureProduct_Description(t *testing.T) {
+	describe := func(s string) *string { return &s }
+
+	f := &fakeProducts{}
+	d := cabling
+	d.Description = describe("Structured cabling within a cage")
+	if err := newProductsClient(t, f).EnsureProduct(context.Background(), d); err != nil {
+		t.Fatalf("EnsureProduct: %v", err)
+	}
+	if got := f.creates[0].Get("description"); got != "Structured cabling within a cage" {
+		t.Errorf("create description = %q", got)
+	}
+
+	existing := `{"id":"prod_datum_1","object":"product","name":"Structured cabling","active":true,"description":"Old words",
+		"tax_code":{"id":"txcd_20030000","object":"tax_code"},"metadata":{}}`
+	f = &fakeProducts{existing: existing}
+	d = cabling
+	d.Metadata = nil
+	if err := newProductsClient(t, f).EnsureProduct(context.Background(), d); err != nil {
+		t.Fatalf("EnsureProduct: %v", err)
+	}
+	if len(f.updates) != 0 {
+		t.Errorf("a nil description changed the Product: %v", f.updates)
+	}
+
+	d.Description = describe("")
+	if err := newProductsClient(t, f).EnsureProduct(context.Background(), d); err != nil {
+		t.Fatalf("EnsureProduct: %v", err)
+	}
+	if len(f.updates) != 1 {
+		t.Fatalf("want one update, got %d", len(f.updates))
+	}
+	if v, ok := f.updates[0]["description"]; !ok || len(v) != 1 || v[0] != "" {
+		t.Errorf("update should unset description, got %v", f.updates[0])
+	}
+}

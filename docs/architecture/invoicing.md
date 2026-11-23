@@ -232,12 +232,13 @@ The rules from the enhancement:
 
 - One Product per SKU, not per price. Customer pricings (`basedOn`) never
   add a Product.
-- The Product's name and tax code come from the newest list pricing with the
-  SKU.
+- The Product's name, description and tax code come from the newest list
+  pricing with the SKU. A pricing without a description clears the
+  Product's. A pricing's `notes` never reach Stripe.
 - No Stripe Prices. Lines pass their unit price inline.
 - A Product is archived (`active: false`) once no pricing uses its SKU, and
   reactivated if one does again. Stripe won't delete an invoiced Product.
-  An archived Product keeps its last name and tax code.
+  An archived Product keeps its last name, description and tax code.
 - A pricing that isn't taxable makes its Product Stripe's nontaxable
   `txcd_00000000`. One with no tax leaves the Product without a code, so the
   account's default applies.

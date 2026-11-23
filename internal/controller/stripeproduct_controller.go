@@ -120,11 +120,12 @@ func (r *StripeProductReconciler) Reconcile(ctx context.Context, req reconcile.R
 		return ctrl.Result{}, err
 	}
 	details := stripeinternal.ProductDetails{
-		ID:       stripeProductID(&product),
-		Name:     desired.name,
-		TaxCode:  desired.taxCode,
-		Active:   desired.active,
-		Metadata: stripeinternal.ProductMetadata(product.Namespace, product.Name, product.Spec.SKU),
+		ID:          stripeProductID(&product),
+		Name:        desired.name,
+		TaxCode:     desired.taxCode,
+		Description: desired.description,
+		Active:      desired.active,
+		Metadata:    stripeinternal.ProductMetadata(product.Namespace, product.Name, product.Spec.SKU),
 	}
 	if details.Name == "" {
 		// Nothing has ever stood for it, so there's nothing to name it.
@@ -207,10 +208,13 @@ func (r *StripeProductReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // productState is what a StripeProduct's Product should be.
 type productState struct {
-	name     string
-	taxCode  string
-	active   bool
-	pricings []string
+	name    string
+	taxCode string
+	// description is the newest pricing's, nil when no pricing stands for
+	// the Product, which then keeps its own.
+	description *string
+	active      bool
+	pricings    []string
 	// conflicts are the list pricings taxed differently from the newest.
 	conflicts []string
 }
@@ -254,6 +258,8 @@ func desiredProduct(product *stripev1alpha1.StripeProduct, all []billingv1alpha1
 		state.name = newest.Name
 	}
 	state.taxCode = pricingTaxCode(&newest)
+	description := newest.Spec.Description
+	state.description = &description
 	for _, sp := range lists {
 		if pricingTaxCode(&sp) != state.taxCode {
 			state.conflicts = append(state.conflicts, sp.Name)
