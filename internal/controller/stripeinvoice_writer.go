@@ -71,7 +71,7 @@ func (r *StripeInvoiceReconciler) reconcileInvoice(ctx context.Context, inv *str
 			result, err := stripe.FinalizeInvoice(ctx, inv.Status.InvoiceID, "stripeinvoice-"+string(inv.UID))
 			if err != nil {
 				return ctrl.Result{}, errors.Join(err, r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) {
-					setCondition(s, inv, stripev1alpha1.StripeInvoiceConditionFinalized, metav1.ConditionFalse, "StripeError", err.Error())
+					setCondition(s, inv, stripev1alpha1.StripeInvoiceConditionFinalized, metav1.ConditionFalse, "StripeError", stripeinternal.ErrorMessage(err))
 				}))
 			}
 			if err := r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) { applyInvoiceState(s, inv, result) }); err != nil {
@@ -106,7 +106,7 @@ func (r *StripeInvoiceReconciler) syncInvoice(ctx context.Context, inv *stripev1
 				// Recorded so the next attempt, and the finalizer, find it.
 				s.InvoiceID = result.ID
 			}
-			setCondition(s, inv, stripev1alpha1.StripeInvoiceConditionSynced, metav1.ConditionFalse, "StripeError", err.Error())
+			setCondition(s, inv, stripev1alpha1.StripeInvoiceConditionSynced, metav1.ConditionFalse, "StripeError", stripeinternal.ErrorMessage(err))
 		}))
 	}
 	return result, nil, r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) {

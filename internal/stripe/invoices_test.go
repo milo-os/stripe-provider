@@ -5,6 +5,7 @@ package stripe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	stripego "github.com/stripe/stripe-go/v87"
 )
 
 // fakeInvoices serves the Stripe invoice, invoice item and coupon calls the
@@ -58,6 +60,16 @@ func (f *fakeInvoices) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	missing := func() {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"code":"resource_missing","type":"invalid_request_error"}}`))
+	}
+	// As Stripe does: an invoice item takes a tax code or price_data, not
+	// both.
+	for k := range form {
+		item, ok := strings.CutSuffix(k, "tax_code")
+		if ok && form.Get(item+"price_data[product]") != "" || ok && form.Get(strings.TrimSuffix(item, "[")+"[price_data][product]") != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"You may only specify one of these parameters: price_data, tax_code.","param":"price_data"}}`))
+			return
+		}
 	}
 	switch {
 	case r.URL.Path == "/v1/invoices/create_preview":
@@ -135,7 +147,7 @@ func rackDraft() InvoiceDraft {
 			{
 				Key: "rack", Description: "Rack space", ProductID: "datum_rack",
 				Quantity: decimal.RequireFromString("1.5"), UnitAmount: decimal.RequireFromString("330.00"),
-				Start: periodStart, End: periodEnd, TaxCode: "txcd_20030000",
+				Start: periodStart, End: periodEnd, TaxCode: "txcd_20030000", ProductTaxCode: "txcd_20030000",
 				DiscountPercent: decimal.RequireFromString("10"), Note: "Install delayed a week",
 				Metadata: map[string]string{"service_pricing": "rack-v1"},
 			},
@@ -168,17 +180,23 @@ func TestPreviewInvoice(t *testing.T) {
 		"invoice_items[0][price_data][unit_amount_decimal]": "33000",
 		"invoice_items[0][price_data][tax_behavior]":        "exclusive",
 		"invoice_items[0][quantity_decimal]":                "1.5",
-		"invoice_items[0][tax_code]":                        "txcd_20030000",
 		"invoice_items[0][period][start]":                   "1797292800",
 		"invoice_items[0][discounts][0][coupon]":            "datum-pct-10",
 		"invoice_items[0][metadata][datum_line_key]":        "rack",
 		"invoice_items[0][metadata][datum_note]":            "Install delayed a week",
 		"invoice_items[0][metadata][datum_service_pricing]": "rack-v1",
 		"invoice_items[1][tax_code]":                        NontaxableTaxCode,
+		"invoice_items[1][unit_amount_decimal]":             "13500",
+		"invoice_items[1][tax_behavior]":                    "exclusive",
+		"invoice_items[1][metadata][datum_product]":         "datum_setup",
 	} {
 		if got := form.Get(k); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
+	}
+	// Taxed as its Product: no code of its own. Taxed otherwise: no Product.
+	if form.Get("invoice_items[0][tax_code]") != "" || form.Get("invoice_items[1][price_data][product]") != "" {
+		t.Errorf("a line has both a tax code and price_data: %v", form)
 	}
 	if len(f.find(http.MethodPost, "/v1/coupons")) != 1 {
 		t.Error("the 10% coupon should be created on first use")
@@ -428,5 +446,17 @@ func TestDashboardInvoiceURL(t *testing.T) {
 	}
 	if got := (&Client{}).DashboardInvoiceURL("in_1"); got != "https://dashboard.stripe.com/invoices/in_1" {
 		t.Errorf("live url = %s", got)
+	}
+}
+
+func TestErrorMessage_DropsWhatChangesEachAttempt(t *testing.T) {
+	se := &stripego.Error{Msg: "You may only specify one of these parameters: price_data, tax_code.",
+		RequestID: "req_123", RequestLogURL: "https://dashboard.stripe.com/logs?object=req_123"}
+	err := fmt.Errorf("adding line %q to Stripe draft in_1: %w", "rack", se)
+	if got, want := ErrorMessage(err), `adding line "rack" to Stripe draft in_1: You may only specify one of these parameters: price_data, tax_code.`; got != want {
+		t.Errorf("ErrorMessage = %q, want %q", got, want)
+	}
+	if got := ErrorMessage(errors.New("plain")); got != "plain" {
+		t.Errorf("ErrorMessage(plain) = %q", got)
 	}
 }
