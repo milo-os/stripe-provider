@@ -113,6 +113,7 @@ func TestEnsureCustomer_UpdatePathSendsMetadata(t *testing.T) {
 		Name:           "Acme Ltd",
 		BusinessName:   "Acme Ltd",
 		IndividualName: "Matt Jenkinson",
+		Description:    "acme · ba-existing",
 	})
 	if err != nil {
 		t.Fatalf("EnsureCustomer update path: %v", err)
@@ -129,6 +130,7 @@ func TestEnsureCustomer_UpdatePathSendsMetadata(t *testing.T) {
 	for _, want := range []string{
 		"metadata[business_name]=Acme Ltd",
 		"metadata[individual_name]=Matt Jenkinson",
+		"description=acme · ba-existing",
 	} {
 		if !strings.Contains(decoded, want) {
 			t.Errorf("update body missing %q\nbody: %s", want, decoded)

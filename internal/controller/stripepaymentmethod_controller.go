@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -445,6 +446,7 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 		d.TaxIDs = append(d.TaxIDs, stripeinternal.TaxIDDetails{Type: t.Type, Value: t.Value})
 	}
 	d.InvoiceFields = invoiceFields(ba)
+	d.Description = customerDescription(ba)
 	// Organizations: today exactly one — the BA's owning org, which is
 	// also its Kubernetes namespace. milo is moving toward shared BAs
 	// across multiple orgs, at which point this mapper grows a lookup
@@ -455,6 +457,19 @@ func customerDetailsFromBillingAccount(ba *billingv1alpha1.BillingAccount) strip
 		d.Organizations = []string{ba.Namespace}
 	}
 	return d
+}
+
+// customerDescription is the Stripe Customer's description: the account's
+// display name and its name, such as "Acme · ba-acme-x1y2z3". The
+// customer's own name is the business or contact name, which invoices
+// print, and the dashboard's search doesn't read metadata, so without it
+// staff can't find a customer by the account they know.
+func customerDescription(ba *billingv1alpha1.BillingAccount) string {
+	display := strings.TrimSpace(ba.Annotations["kubernetes.io/display-name"])
+	if display == "" || display == ba.Name {
+		return ba.Name
+	}
+	return display + " · " + ba.Name
 }
 
 // ensurePaymentMethodAwaiting moves the parent PaymentMethod phase to

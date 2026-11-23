@@ -88,6 +88,10 @@ type CustomerDetails struct {
 	// clears the fields once the terms end. Stripe allows at most 4,
 	// with names up to 40 and values up to 140 characters.
 	InvoiceFields []InvoiceField
+	// Description is the Customer's description, which staff search the
+	// Stripe dashboard by and customers never see: the account's display
+	// name and its name. Sent when set.
+	Description string
 }
 
 // InvoiceField is one name/value pair printed on a customer's invoices.
@@ -262,6 +266,9 @@ func applyCustomerDetails(params *stripego.CustomerUpdateParams, d CustomerDetai
 	if d.Email != "" {
 		params.Email = stripego.String(d.Email)
 	}
+	if d.Description != "" {
+		params.Description = stripego.String(d.Description)
+	}
 	if d.Address != nil {
 		params.Address = &stripego.AddressParams{
 			Country:    nilIfEmpty(d.Address.Country),
@@ -316,10 +323,11 @@ func applyCustomerDetails(params *stripego.CustomerUpdateParams, d CustomerDetai
 // the same customer fields, as separate types.
 func customerCreateParams(u *stripego.CustomerUpdateParams) *stripego.CustomerCreateParams {
 	p := &stripego.CustomerCreateParams{
-		Name:     u.Name,
-		Email:    u.Email,
-		Address:  u.Address,
-		Metadata: u.Metadata,
+		Name:        u.Name,
+		Email:       u.Email,
+		Description: u.Description,
+		Address:     u.Address,
+		Metadata:    u.Metadata,
 	}
 	if u.InvoiceSettings != nil {
 		fields := make([]*stripego.CustomerCreateInvoiceSettingsCustomFieldParams, 0, len(u.InvoiceSettings.CustomFields))
