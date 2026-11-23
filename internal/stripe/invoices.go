@@ -393,24 +393,28 @@ func lineInvoiceItem(line *stripego.InvoiceLineItem) string {
 
 // FinalizeInvoice finalizes a draft so Stripe charges or sends it, by its
 // collection method. An invoice that's already past draft is just read.
-func (c *Client) FinalizeInvoice(ctx context.Context, id, idempotencyKey string) (*InvoiceResult, error) {
+//
+// The finalize request carries no idempotency key. Stripe stores the
+// result of a keyed request, a refusal included, and replays it for 24
+// hours: a draft refused once, for a customer with no tax location, went
+// on being refused after the customer gained one. A key isn't needed to
+// keep it from happening twice: only a draft is finalized, and Stripe
+// refuses to finalize an invoice that isn't one.
+func (c *Client) FinalizeInvoice(ctx context.Context, id string) (*InvoiceResult, error) {
 	inv, err := c.api.V1Invoices.Retrieve(ctx, id, &stripego.InvoiceRetrieveParams{})
 	if err != nil {
 		return nil, fmt.Errorf("retrieving Stripe invoice %s: %w", id, err)
 	}
 	if inv.Status == stripego.InvoiceStatusDraft {
-		// A draft keeps the tax Stripe worked out when it last changed: one
-		// written while its customer had no address stays without a tax
-		// location, and Stripe refuses to finalize it
-		// (customer_tax_location_invalid) even once the customer has one.
-		// Updating the draft has Stripe work its tax out again.
+		// Updating the draft has Stripe work its tax out again from the
+		// customer as it is now, such as one that has since gained an
+		// address.
 		if _, err := c.api.V1Invoices.Update(ctx, id, &stripego.InvoiceUpdateParams{
 			AutomaticTax: &stripego.InvoiceUpdateAutomaticTaxParams{Enabled: stripego.Bool(true)},
 		}); err != nil {
 			return nil, fmt.Errorf("recalculating tax on Stripe invoice %s: %w", id, err)
 		}
 		params := &stripego.InvoiceFinalizeInvoiceParams{AutoAdvance: stripego.Bool(true)}
-		params.SetIdempotencyKey(idempotencyKey + "-finalize")
 		inv, err = c.api.V1Invoices.FinalizeInvoice(ctx, id, params)
 		if err != nil {
 			return nil, fmt.Errorf("finalizing Stripe invoice %s: %w", id, err)

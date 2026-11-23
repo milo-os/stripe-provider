@@ -40,7 +40,7 @@ type fakeInvoicer struct {
 	delErr error
 }
 
-func (f *fakeInvoicer) FinalizeInvoice(_ context.Context, id, _ string) (*stripeinternal.InvoiceResult, error) {
+func (f *fakeInvoicer) FinalizeInvoice(_ context.Context, id string) (*stripeinternal.InvoiceResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finalized = append(f.finalized, id)

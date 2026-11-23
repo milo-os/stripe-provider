@@ -51,7 +51,7 @@ const (
 type stripeInvoicer interface {
 	PreviewInvoice(ctx context.Context, d stripeinternal.InvoiceDraft) (*stripeinternal.InvoiceResult, error)
 	EnsureDraftInvoice(ctx context.Context, existingID string, d stripeinternal.InvoiceDraft) (*stripeinternal.InvoiceResult, error)
-	FinalizeInvoice(ctx context.Context, id, idempotencyKey string) (*stripeinternal.InvoiceResult, error)
+	FinalizeInvoice(ctx context.Context, id string) (*stripeinternal.InvoiceResult, error)
 	RetrieveInvoice(ctx context.Context, id string) (*stripeinternal.InvoiceResult, error)
 	DeleteDraftInvoice(ctx context.Context, id string) error
 	DashboardInvoiceURL(id string) string

@@ -20,8 +20,8 @@ func TestCustomerDescription(t *testing.T) {
 	}
 	for display, want := range map[string]string{
 		"Acme":           "Acme · ba-acme-x1y2z3",
-		"":                  "ba-acme-x1y2z3",
-		"  ":                "ba-acme-x1y2z3",
+		"":               "ba-acme-x1y2z3",
+		"  ":             "ba-acme-x1y2z3",
 		"ba-acme-x1y2z3": "ba-acme-x1y2z3",
 	} {
 		if got := customerDescription(account(display)); got != want {

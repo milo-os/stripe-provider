@@ -68,7 +68,7 @@ func (r *StripeInvoiceReconciler) reconcileInvoice(ctx context.Context, inv *str
 			}
 		}
 		if inv.Spec.Finalize && apimeta.IsStatusConditionTrue(inv.Status.Conditions, stripev1alpha1.StripeInvoiceConditionSynced) {
-			result, err := stripe.FinalizeInvoice(ctx, inv.Status.InvoiceID, "stripeinvoice-"+string(inv.UID))
+			result, err := stripe.FinalizeInvoice(ctx, inv.Status.InvoiceID)
 			if err != nil {
 				return ctrl.Result{}, errors.Join(err, r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) {
 					setCondition(s, inv, stripev1alpha1.StripeInvoiceConditionFinalized, metav1.ConditionFalse, "StripeError", stripeinternal.ErrorMessage(err))
