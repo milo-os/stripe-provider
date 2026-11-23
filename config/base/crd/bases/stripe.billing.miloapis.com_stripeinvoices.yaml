@@ -21,6 +21,12 @@ spec:
     - jsonPath: .spec.purpose
       name: Purpose
       type: string
+    - jsonPath: .status.number
+      name: Number
+      type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
     - jsonPath: .status.total
       name: Total
       type: string
@@ -37,11 +43,12 @@ spec:
           StripeInvoice is the Schema for the stripeinvoices API.
 
           A StripeInvoice is an invoice for Stripe to work out, as lines with a
-          Product, quantity, unit price, service period and tax. For now it only
-          previews: Stripe's own preview with nothing created, or a draft that
-          staff open in the Stripe dashboard and that's deleted after a day. Both
-          use the same lines a real invoice will, so a preview can't drift from
-          what's billed.
+          Product, quantity, unit price, service period and tax. It previews
+          (Stripe's own preview with nothing created, or a draft that staff open in
+          the Stripe dashboard and that's deleted after a day) or writes a real
+          invoice: a draft kept in step with the lines, finalized on request, whose
+          payment Stripe's events keep current. Previews and invoices share the same
+          lines, so a preview can't drift from what's billed.
 
           Other controllers create StripeInvoices, in the billing account's
           namespace; staff don't. See docs/architecture/invoicing.md.
@@ -84,6 +91,13 @@ spec:
                   only.
                 pattern: ^USD$
                 type: string
+              finalize:
+                description: |-
+                  Finalize, on an Invoice, finalizes it in Stripe once it's synced.
+                  Stripe then charges the default payment method, or sends the invoice
+                  for an account on payment terms. It can't be undone, and the lines
+                  can't change after it.
+                type: boolean
               lines:
                 description: Lines are the invoice's charges, in order.
                 items:
@@ -207,19 +221,45 @@ spec:
                 - key
                 x-kubernetes-list-type: map
               purpose:
-                description: Purpose is Preview or PreviewDraft.
+                description: Purpose is Preview, PreviewDraft or Invoice.
                 enum:
                 - Preview
                 - PreviewDraft
+                - Invoice
                 type: string
+              source:
+                description: |-
+                  Source is where a real invoice came from. Its ID goes on the Stripe
+                  invoice's metadata, so the source's own records find it.
+                properties:
+                  invoiceId:
+                    description: InvoiceID is the source's ID for the invoice.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  system:
+                    description: System is the source.
+                    enum:
+                    - OpenMeter
+                    type: string
+                required:
+                - invoiceId
+                - system
+                type: object
             required:
             - billingAccountRef
             - lines
             - purpose
             type: object
             x-kubernetes-validations:
-            - message: spec is immutable; create a new StripeInvoice
-              rule: self == oldSelf
+            - message: a preview's spec is immutable; create a new StripeInvoice
+              rule: oldSelf.purpose == 'Invoice' || self == oldSelf
+            - message: purpose and billingAccountRef can't change
+              rule: self.purpose == oldSelf.purpose && self.billingAccountRef == oldSelf.billingAccountRef
+            - message: only an Invoice can be finalized
+              rule: '!has(self.finalize) || !self.finalize || self.purpose == ''Invoice'''
+            - message: the spec is immutable once finalize is true
+              rule: '!has(oldSelf.finalize) || !oldSelf.finalize || self == oldSelf'
           status:
             description: |-
               StripeInvoiceStatus defines the observed state of a StripeInvoice.
@@ -229,6 +269,12 @@ spec:
                 description: |-
                   AmountDue is what the customer would be charged: Total with the
                   starting balance applied.
+                type: string
+              amountPaid:
+                description: AmountPaid is what's been paid so far.
+                type: string
+              amountRemaining:
+                description: AmountRemaining is what's still owed.
                 type: string
               conditions:
                 description: Conditions represent the latest available observations.
@@ -296,17 +342,31 @@ spec:
               discount:
                 description: Discount is the sum of the discounts.
                 type: string
+              dueDate:
+                description: DueDate is when payment is due, for an invoice that's
+                  sent.
+                format: date-time
+                type: string
               expiresAt:
                 description: |-
                   ExpiresAt is when the StripeInvoice deletes itself: an hour after
                   it's created for a Preview, a day for a PreviewDraft, which takes
-                  its draft with it.
+                  its draft with it. An Invoice never expires.
                 format: date-time
+                type: string
+              finalizedAt:
+                description: FinalizedAt is when Stripe finalized the invoice.
+                format: date-time
+                type: string
+              hostedInvoiceUrl:
+                description: |-
+                  HostedInvoiceURL is the invoice's page in Stripe, where the customer
+                  reads, downloads and pays it. Set once it's finalized.
                 type: string
               invoiceId:
                 description: |-
-                  InvoiceID is the Stripe invoice: the draft for PreviewDraft. A
-                  Preview creates nothing, so it has none.
+                  InvoiceID is the Stripe invoice: the draft for PreviewDraft, the
+                  invoice for Invoice. A Preview creates nothing, so it has none.
                 type: string
               lines:
                 description: Lines are Stripe's amounts for each spec line, by key.
@@ -321,6 +381,10 @@ spec:
                     discount:
                       description: Discount is the line's discount.
                       type: string
+                    invoiceItemId:
+                      description: InvoiceItemID is the Stripe invoice item behind
+                        the line.
+                      type: string
                     key:
                       description: Key is the spec line's key.
                       type: string
@@ -334,17 +398,41 @@ spec:
                 x-kubernetes-list-map-keys:
                 - key
                 x-kubernetes-list-type: map
+              linesHash:
+                description: |-
+                  LinesHash is a hash of the spec lines last written to Stripe, so a
+                  change to them is seen.
+                type: string
+              number:
+                description: |-
+                  Number is the number Stripe gives an Invoice when it's finalized,
+                  such as "DATUM-0042".
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the
                   controller.
                 format: int64
                 type: integer
+              paidAt:
+                description: PaidAt is when the invoice was paid.
+                format: date-time
+                type: string
               startingBalance:
                 description: |-
                   StartingBalance is the customer's balance that Stripe carries onto
                   the invoice: positive for what they already owe, such as an earlier
                   invoice below Stripe's minimum charge, negative for credit.
+                type: string
+              state:
+                description: State is where an Invoice stands in Stripe.
+                enum:
+                - Draft
+                - Open
+                - Paid
+                - Void
+                - Uncollectible
+                - Deleted
                 type: string
               subtotal:
                 description: Subtotal is the sum of the lines before discounts and

@@ -143,7 +143,7 @@ spec:
   billingAccountRef: {name: acme}
   purpose: Invoice            # Invoice | Preview | PreviewDraft
   currency: USD
-  source:                     # where the invoice came from, for metadata
+  source:                     # where the invoice came from: om_invoice_id metadata
     system: OpenMeter
     invoiceId: 01JD...
   lines:
@@ -179,15 +179,20 @@ status:
   tax: "86.40"
   total: "1166.40"
   hostedInvoiceUrl: ""        # set at finalization
+  finalizedAt: null
+  dueDate: null               # for an invoice that's sent
+  paidAt: null
+  amountPaid: "0.00"
+  amountRemaining: "0.00"
+  linesHash: 3f9a...          # the spec lines last written
   dashboardUrl: https://dashboard.stripe.com/invoices/in_...
-  conditions: [Synced, Finalized, AmountsMatch]
+  conditions: [Synced, Finalized, AmountsMatch, PaymentFailed]
   observedGeneration: 3
 ```
 
-Built so far: `Preview` and `PreviewDraft`. For those the whole spec is
-immutable, so a new preview is a new `StripeInvoice`. `Invoice`, `source`,
-`finalize` and the status fields for a real invoice come with the
-[invoice controller](#invoice-controller).
+All three purposes are built. A preview's whole spec is immutable, so a new
+preview is a new `StripeInvoice`. An `Invoice`'s lines can change until
+`finalize` is set.
 
 Rules, enforced by CEL:
 
@@ -256,18 +261,31 @@ Reconciles `StripeInvoice`s with `purpose: Invoice`. On each pass:
    - metadata: `om_invoice_id` (for OpenMeter's invoices), `datum_stripe_invoice`
      (namespace/name), `datum_purpose`.
    - It records `status.invoiceId` before anything else.
-3. **Sync the lines.** For each spec line, create, update or delete the
-   invoice item on the invoice, keyed by `datum_line_key` in its metadata. See
-   [Writing Lines](#writing-lines). Every item is created with `invoice` set to
-   this invoice.
+3. **Sync the lines.** Each invoice item carries its line's key
+   (`datum_line_key`) and a hash of everything it's written from
+   (`datum_line_hash`). An item whose line is gone, or whose hash no longer
+   matches, is deleted; a line with no current item is created. Writing a
+   changed line again, rather than updating its item, keeps one code path
+   for every field. See [Writing Lines](#writing-lines). Every item is created
+   with `invoice` set to this invoice. The draft's collection method follows
+   the payment arrangement if it changed.
 4. **Read back** amounts, discounts and tax per line, and totals, into
    status.
 5. **Check amounts.** See [Checking amounts](#checking-amounts). `Synced`
    becomes True only when they match.
-6. **Finalize** when `spec.finalize` is true and `Synced` is True: finalize
-   the invoice, then record `number`, `hostedInvoiceUrl` and `Finalized=True`.
-   Stripe then charges the default payment method or sends the invoice,
-   by its collection method.
+6. **Finalize** when `spec.finalize` is true. Steps 3 to 5 run once more
+   first, even if the spec hasn't changed, so an item someone added to or
+   removed from the draft in the Stripe dashboard is put right rather than
+   billed; an item without a current `datum_line_key` is deleted. If
+   `Synced` is True after that, finalize
+   the invoice with `auto_advance: true`, then record `number`,
+   `hostedInvoiceUrl` and `Finalized=True`. Stripe then charges the default
+   payment method or sends the invoice, by its collection method.
+7. **Read its state** from Stripe on every pass, and every six hours until
+   it's paid or void: state, number, amounts, due and paid dates, and
+   `PaymentFailed` while Stripe's attempts to charge it are failing. A draft
+   someone deleted in Stripe becomes `state: Deleted` and isn't written
+   again.
 
 A `StripeInvoice` deleted before finalization deletes its Stripe draft
 (finalizer). One deleted after finalization leaves the Stripe invoice alone:
@@ -296,10 +314,16 @@ That needs no `StripeInvoice`. For invoices it writes itself, it adds:
 | `invoice.marked_uncollectible` | `state: Uncollectible` |
 | `invoice.deleted` | `state: Deleted` |
 
-An event finds its `StripeInvoice` through `datum_stripe_invoice` in the
-invoice's metadata. Events for invoices without it (staff-created ones) are
-ignored, as today. The invoice controller also refreshes state every few
-hours, so a missed event only delays a status.
+An event finds its `StripeInvoice` through `datum_stripe_invoice` (and
+`datum_stripe_invoice_uid`) in the invoice's metadata, and stamps the
+event's ID on its `stripe.billing.miloapis.com/refresh` annotation. The
+controller then reads the invoice from Stripe: events say that something
+changed, Stripe says what, so a late or repeated event can't set an old
+state. `invoice.payment_succeeded`, `invoice.updated` and `invoice.sent` do
+the same. Events for invoices without our metadata (staff-created ones) and
+for preview drafts are ignored. The invoice controller also refreshes state
+every six hours, so a missed event only delays a status. The webhook
+endpoint has to be subscribed to these events in each Stripe account.
 
 ## The Invoice Lifecycle
 
@@ -449,9 +473,17 @@ Previews have no PDF or hosted page in Stripe. The staff portal renders
   plus `create`. `status.invoiceId` is written straight after. If the write
   is lost, the next pass lists the customer's draft invoices and adopts the
   one whose `datum_stripe_invoice` metadata names this resource.
-- **Creating a line.** The key is the UID, the line key and the spec
-  generation. Lines are matched to items by `datum_line_key`, so a retried
-  pass updates rather than duplicates.
+- **Creating a line.** The key is the UID, the line key, the spec
+  generation and the line's hash. Lines are matched to items by
+  `datum_line_key`, so a retried pass updates rather than duplicates. The
+  generation is there because Stripe replays a reused key for 24 hours with
+  the item it first created, even if that item has since been deleted: a
+  line removed and added back unchanged, which is a new generation, gets a
+  new key and is written again. An item someone deletes in the Stripe
+  dashboard is the one case a reused key can't fix: within the same
+  generation and 24 hours, the line stays missing, `Synced` stays False on
+  `AmountsDiffer`, and the invoice isn't finalized until the key expires or
+  the spec changes.
 - **Finalizing** is safe to repeat: Stripe refuses to finalize twice, and the
   controller reads the state back.
 - **Stripe errors.** Rate limits and 5xx requeue with backoff. A 4xx sets a
@@ -524,7 +556,7 @@ Each phase ships on its own.
    and staff-portal: Stripe previews of contracts. This exercises line
    writing, tax and Products against real customers without billing anyone.
 4. **Invoices on staging.** stripe-provider: the invoice controller and
-   webhooks. openmeter-provider: Custom Invoicing and the line builder.
+   webhooks (built). openmeter-provider: Custom Invoicing and the line builder.
    Staging accounts move over, and each invoice is compared with what
    OpenMeter's Stripe app would have written.
 5. **Charges staff add.** billing, openmeter-provider and staff-portal.

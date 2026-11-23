@@ -4,8 +4,11 @@ package stripe
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +32,22 @@ const (
 	// MetadataNote holds a line's note, for staff. Metadata isn't printed
 	// on invoices.
 	MetadataNote = "datum_note"
+	// MetadataOpenMeterInvoiceID is OpenMeter's ID for an invoice it
+	// assembled, the key OpenMeter's own Stripe integration used, so
+	// openmeter-provider matches the Stripe invoice to OpenMeter's.
+	MetadataOpenMeterInvoiceID = "om_invoice_id"
+	// MetadataLineHash is a hash of everything a line is written from, on
+	// its invoice item, so a line whose spec changed is rewritten.
+	MetadataLineHash = "datum_line_hash"
+)
+
+// Collection methods for an invoice.
+const (
+	// CollectionChargeAutomatically charges the customer's default payment
+	// method when the invoice is finalized.
+	CollectionChargeAutomatically = "charge_automatically"
+	// CollectionSendInvoice emails the invoice, due DaysUntilDue days later.
+	CollectionSendInvoice = "send_invoice"
 )
 
 // NontaxableTaxCode is Stripe's tax code for a product that's never taxed.
@@ -47,7 +66,24 @@ type InvoiceDraft struct {
 	// IdempotencyKey prefixes the idempotency keys of the writes, so a
 	// retried create is the same create.
 	IdempotencyKey string
-	Lines          []InvoiceLine
+	// Revision is the source's version of the lines, such as its
+	// generation. It's in each line's idempotency key, so a line removed
+	// and later added back, unchanged, is written again rather than
+	// replayed by Stripe as the item it already deleted.
+	Revision string
+	// CollectionMethod is CollectionChargeAutomatically (the default) or
+	// CollectionSendInvoice.
+	CollectionMethod string
+	// DaysUntilDue is how long a sent invoice gives the customer to pay.
+	DaysUntilDue int64
+	Lines        []InvoiceLine
+}
+
+func (d InvoiceDraft) collectionMethod() string {
+	if d.CollectionMethod == "" {
+		return CollectionChargeAutomatically
+	}
+	return d.CollectionMethod
 }
 
 // InvoiceLine is one invoice item.
@@ -75,12 +111,23 @@ type InvoiceLine struct {
 // InvoiceResult is Stripe's working of an invoice, in minor units.
 type InvoiceResult struct {
 	// ID is the invoice's ID: an "upcoming_in_" ID for a preview.
-	ID       string
-	Status   string
-	Subtotal int64
-	Discount int64
-	Tax      int64
-	Total    int64
+	ID     string
+	Status string
+	// Number is given when the invoice is finalized.
+	Number string
+	// HostedInvoiceURL is the customer's page for a finalized invoice.
+	HostedInvoiceURL string
+	// FinalizedAt, PaidAt and DueDate are zero until they apply.
+	FinalizedAt, PaidAt, DueDate time.Time
+	AmountPaid, AmountRemaining  int64
+	// AttemptCount is how many times Stripe has tried to charge it;
+	// NextPaymentAttempt is when it tries again, zero when it won't.
+	AttemptCount       int64
+	NextPaymentAttempt time.Time
+	Subtotal           int64
+	Discount           int64
+	Tax                int64
+	Total              int64
 	// StartingBalance is the customer's balance carried onto the invoice:
 	// positive for what they owe, negative for credit.
 	StartingBalance int64
@@ -91,10 +138,12 @@ type InvoiceResult struct {
 
 // LineResult is Stripe's amounts for one line, in minor units.
 type LineResult struct {
-	Key      string
-	Amount   int64
-	Discount int64
-	Tax      int64
+	Key string
+	// InvoiceItemID is the invoice item behind the line.
+	InvoiceItemID string
+	Amount        int64
+	Discount      int64
+	Tax           int64
 }
 
 // PreviewInvoice asks Stripe what the invoice would be, tax included,
@@ -142,9 +191,15 @@ func (c *Client) PreviewInvoice(ctx context.Context, d InvoiceDraft) (*InvoiceRe
 
 // EnsureDraftInvoice makes the draft invoice d describes, or finishes the
 // one an earlier attempt made: existingID when the caller recorded it, or
-// a draft of the customer whose metadata names d. It's never finalized:
-// auto_advance is off. Items are created on the draft itself, never left
-// pending on the customer, where Stripe could add them to a real invoice.
+// a draft of the customer whose metadata names d. It's never finalized
+// here: auto_advance is off. Items are created on the draft itself, never
+// left pending on the customer, where Stripe could add them to another
+// invoice.
+//
+// The draft's lines are made to match d's exactly: a line d no longer has
+// is removed, one whose content changed is written again, and a missing
+// one is added. Lines are matched by their key and content hash, kept on
+// each invoice item's metadata.
 func (c *Client) EnsureDraftInvoice(ctx context.Context, existingID string, d InvoiceDraft) (*InvoiceResult, error) {
 	id := existingID
 	if id == "" {
@@ -159,11 +214,16 @@ func (c *Client) EnsureDraftInvoice(ctx context.Context, existingID string, d In
 			Customer:                    stripego.String(d.CustomerID),
 			Currency:                    stripego.String(strings.ToLower(d.Currency)),
 			AutoAdvance:                 stripego.Bool(false),
-			CollectionMethod:            stripego.String("charge_automatically"),
+			CollectionMethod:            stripego.String(d.collectionMethod()),
 			PendingInvoiceItemsBehavior: stripego.String("exclude"),
 			AutomaticTax:                &stripego.InvoiceCreateAutomaticTaxParams{Enabled: stripego.Bool(true)},
-			Description:                 stripego.String(d.Description),
 			Metadata:                    d.Metadata,
+		}
+		if d.Description != "" {
+			params.Description = stripego.String(d.Description)
+		}
+		if d.collectionMethod() == CollectionSendInvoice {
+			params.DaysUntilDue = stripego.Int64(d.DaysUntilDue)
 		}
 		params.SetIdempotencyKey(d.IdempotencyKey + "-invoice")
 		inv, err := c.api.V1Invoices.Create(ctx, params)
@@ -173,9 +233,77 @@ func (c *Client) EnsureDraftInvoice(ctx context.Context, existingID string, d In
 		id = inv.ID
 	}
 
-	have, err := c.lineKeys(ctx, id)
+	inv, err := c.api.V1Invoices.Retrieve(ctx, id, &stripego.InvoiceRetrieveParams{})
+	if isResourceMissing(err) {
+		return &InvoiceResult{ID: id}, fmt.Errorf("%w: %s", ErrInvoiceMissing, id)
+	}
 	if err != nil {
-		return nil, err
+		return &InvoiceResult{ID: id}, fmt.Errorf("retrieving Stripe draft %s: %w", id, err)
+	}
+	if inv.Status != stripego.InvoiceStatusDraft {
+		return c.invoiceResult(ctx, inv)
+	}
+	if err := c.syncCollection(ctx, inv, d); err != nil {
+		return &InvoiceResult{ID: id}, err
+	}
+	if err := c.syncLines(ctx, id, d); err != nil {
+		return &InvoiceResult{ID: id}, err
+	}
+
+	inv, err = c.api.V1Invoices.Retrieve(ctx, id, &stripego.InvoiceRetrieveParams{})
+	if err != nil {
+		return &InvoiceResult{ID: id}, fmt.Errorf("retrieving Stripe draft %s: %w", id, err)
+	}
+	return c.invoiceResult(ctx, inv)
+}
+
+// syncCollection sets the draft's collection method and terms to d's,
+// which follow the account's payment arrangement, if they've changed.
+func (c *Client) syncCollection(ctx context.Context, inv *stripego.Invoice, d InvoiceDraft) error {
+	want := d.collectionMethod()
+	if string(inv.CollectionMethod) == want &&
+		(want != CollectionSendInvoice || inv.DueDate == 0 || daysBetween(inv.Created, inv.DueDate) == d.DaysUntilDue) {
+		return nil
+	}
+	params := &stripego.InvoiceUpdateParams{CollectionMethod: stripego.String(want)}
+	if want == CollectionSendInvoice {
+		params.DaysUntilDue = stripego.Int64(d.DaysUntilDue)
+	}
+	if _, err := c.api.V1Invoices.Update(ctx, inv.ID, params); err != nil {
+		return fmt.Errorf("setting collection on Stripe draft %s: %w", inv.ID, err)
+	}
+	return nil
+}
+
+func daysBetween(from, to int64) int64 {
+	return (to - from + 12*3600) / (24 * 3600)
+}
+
+// syncLines makes the draft's invoice items match d's lines.
+func (c *Client) syncLines(ctx context.Context, id string, d InvoiceDraft) error {
+	want := map[string]string{}
+	for _, l := range d.Lines {
+		want[l.Key] = l.hash()
+	}
+	have := map[string]bool{}
+	for line, err := range c.api.V1Invoices.ListLines(ctx, &stripego.InvoiceListLinesParams{Invoice: stripego.String(id)}).All(ctx) {
+		if err != nil {
+			return fmt.Errorf("listing lines of Stripe draft %s: %w", id, err)
+		}
+		key, hash := line.Metadata[MetadataLineKey], line.Metadata[MetadataLineHash]
+		// A preview draft written before lines carried a hash keeps them.
+		current := want[key] != "" && (hash == want[key] || (hash == "" && d.Metadata[MetadataPurpose] == "PreviewDraft"))
+		if current && !have[key] {
+			have[key] = true
+			continue
+		}
+		item := lineInvoiceItem(line)
+		if item == "" {
+			return fmt.Errorf("line %s of Stripe draft %s has no invoice item to remove", line.ID, id)
+		}
+		if _, err := c.api.V1InvoiceItems.Delete(ctx, item, &stripego.InvoiceItemDeleteParams{}); err != nil && !isResourceMissing(err) {
+			return fmt.Errorf("removing line %q from Stripe draft %s: %w", key, id, err)
+		}
 	}
 	for _, l := range d.Lines {
 		if have[l.Key] {
@@ -204,22 +332,61 @@ func (c *Client) EnsureDraftInvoice(ctx context.Context, existingID string, d In
 		if l.DiscountPercent.IsPositive() {
 			coupon, err := c.ensureCoupon(ctx, l.DiscountPercent)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			item.Discounts = []*stripego.InvoiceItemCreateDiscountParams{{Coupon: stripego.String(coupon)}}
 		}
-		item.SetIdempotencyKey(d.IdempotencyKey + "-line-" + l.Key)
+		// The revision and hash are in the key, so a line written again,
+		// after a change or after being removed and added back, isn't
+		// mistaken by Stripe for a retry of an earlier write.
+		item.SetIdempotencyKey(d.IdempotencyKey + "-line-" + l.Key + "-r" + d.Revision + "-" + l.hash())
 		if _, err := c.api.V1InvoiceItems.Create(ctx, item); err != nil {
-			return &InvoiceResult{ID: id}, fmt.Errorf("adding line %q to Stripe draft %s: %w", l.Key, id, err)
+			return fmt.Errorf("adding line %q to Stripe draft %s: %w", l.Key, id, err)
 		}
 	}
+	return nil
+}
 
+func lineInvoiceItem(line *stripego.InvoiceLineItem) string {
+	if line.Parent != nil && line.Parent.InvoiceItemDetails != nil {
+		return line.Parent.InvoiceItemDetails.InvoiceItem
+	}
+	return ""
+}
+
+// FinalizeInvoice finalizes a draft so Stripe charges or sends it, by its
+// collection method. An invoice that's already past draft is just read.
+func (c *Client) FinalizeInvoice(ctx context.Context, id, idempotencyKey string) (*InvoiceResult, error) {
 	inv, err := c.api.V1Invoices.Retrieve(ctx, id, &stripego.InvoiceRetrieveParams{})
 	if err != nil {
-		return &InvoiceResult{ID: id}, fmt.Errorf("retrieving Stripe draft %s: %w", id, err)
+		return nil, fmt.Errorf("retrieving Stripe invoice %s: %w", id, err)
+	}
+	if inv.Status == stripego.InvoiceStatusDraft {
+		params := &stripego.InvoiceFinalizeInvoiceParams{AutoAdvance: stripego.Bool(true)}
+		params.SetIdempotencyKey(idempotencyKey + "-finalize")
+		inv, err = c.api.V1Invoices.FinalizeInvoice(ctx, id, params)
+		if err != nil {
+			return nil, fmt.Errorf("finalizing Stripe invoice %s: %w", id, err)
+		}
 	}
 	return c.invoiceResult(ctx, inv)
 }
+
+// RetrieveInvoice reads an invoice's state and amounts.
+func (c *Client) RetrieveInvoice(ctx context.Context, id string) (*InvoiceResult, error) {
+	inv, err := c.api.V1Invoices.Retrieve(ctx, id, &stripego.InvoiceRetrieveParams{})
+	if isResourceMissing(err) {
+		return nil, fmt.Errorf("%w: %s", ErrInvoiceMissing, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("retrieving Stripe invoice %s: %w", id, err)
+	}
+	return c.invoiceResult(ctx, inv)
+}
+
+// ErrInvoiceMissing is returned by RetrieveInvoice for an invoice Stripe
+// doesn't have, such as a draft someone deleted.
+var ErrInvoiceMissing = errors.New("the Stripe invoice doesn't exist")
 
 // ErrInvoiceNotDraft is returned by DeleteDraftInvoice for an invoice
 // someone finalized, which Stripe won't delete.
@@ -275,26 +442,19 @@ func (c *Client) findDraftInvoice(ctx context.Context, d InvoiceDraft) (string, 
 	return "", nil
 }
 
-// lineKeys are the keys of the lines already on an invoice.
-func (c *Client) lineKeys(ctx context.Context, id string) (map[string]bool, error) {
-	keys := map[string]bool{}
-	for line, err := range c.api.V1Invoices.ListLines(ctx, &stripego.InvoiceListLinesParams{Invoice: stripego.String(id)}).All(ctx) {
-		if err != nil {
-			return nil, fmt.Errorf("listing lines of Stripe draft %s: %w", id, err)
-		}
-		if k := line.Metadata[MetadataLineKey]; k != "" {
-			keys[k] = true
-		}
-	}
-	return keys, nil
-}
-
 // invoiceResult reads Stripe's amounts. A preview holds only its first
 // lines inline, so the rest are listed.
 func (c *Client) invoiceResult(ctx context.Context, inv *stripego.Invoice) (*InvoiceResult, error) {
 	res := &InvoiceResult{
 		ID: inv.ID, Status: string(inv.Status), Subtotal: inv.Subtotal, Total: inv.Total,
 		StartingBalance: inv.StartingBalance, AmountDue: inv.AmountDue,
+		Number: inv.Number, HostedInvoiceURL: inv.HostedInvoiceURL,
+		AmountPaid: inv.AmountPaid, AmountRemaining: inv.AmountRemaining,
+		DueDate: unixTime(inv.DueDate), AttemptCount: inv.AttemptCount,
+		NextPaymentAttempt: unixTime(inv.NextPaymentAttempt),
+	}
+	if t := inv.StatusTransitions; t != nil {
+		res.FinalizedAt, res.PaidAt = unixTime(t.FinalizedAt), unixTime(t.PaidAt)
 	}
 	for _, t := range inv.TotalTaxes {
 		res.Tax += t.Amount
@@ -316,7 +476,7 @@ func (c *Client) invoiceResult(ctx context.Context, inv *stripego.Invoice) (*Inv
 		}
 	}
 	for _, line := range lines {
-		lr := LineResult{Key: line.Metadata[MetadataLineKey], Amount: line.Amount}
+		lr := LineResult{Key: line.Metadata[MetadataLineKey], InvoiceItemID: lineInvoiceItem(line), Amount: line.Amount}
 		for _, d := range line.DiscountAmounts {
 			lr.Discount += d.Amount
 		}
@@ -353,7 +513,7 @@ func (c *Client) ensureCoupon(ctx context.Context, percent decimal.Decimal) (str
 }
 
 func lineMetadata(l InvoiceLine) map[string]string {
-	md := map[string]string{MetadataLineKey: l.Key}
+	md := map[string]string{MetadataLineKey: l.Key, MetadataLineHash: l.hash()}
 	for k, v := range l.Metadata {
 		md["datum_"+k] = v
 	}
@@ -361,6 +521,32 @@ func lineMetadata(l InvoiceLine) map[string]string {
 		md[MetadataNote] = l.Note
 	}
 	return md
+}
+
+// hash is a short hash of everything the line's invoice item is written
+// from.
+func (l InvoiceLine) hash() string {
+	keys := make([]string, 0, len(l.Metadata))
+	for k := range l.Metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s\x00%s\x00%s",
+		l.Key, l.Description, l.ProductID, l.Quantity.String(), l.UnitAmount.String(),
+		l.Start.Unix(), l.End.Unix(), l.TaxCode, l.DiscountPercent.String(), l.Note)
+	for _, k := range keys {
+		fmt.Fprintf(&b, "\x00%s=%s", k, l.Metadata[k])
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:8])
+}
+
+func unixTime(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0).UTC()
 }
 
 // minorUnits converts an amount in the currency's major unit to cents.

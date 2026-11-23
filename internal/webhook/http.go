@@ -205,6 +205,18 @@ func (wh *Webhook) dispatch(ctx context.Context, event *stripego.Event) Response
 			log.Error(err, "handling invoice.sent", "id", event.ID)
 			return InternalServerErrorResponse()
 		}
+		// Also news for an invoice we wrote.
+		if err := wh.refreshStripeInvoice(ctx, event); err != nil {
+			log.Error(err, "refreshing StripeInvoice", "id", event.ID, "type", event.Type)
+			return InternalServerErrorResponse()
+		}
+		return OkResponse()
+	case "invoice.finalized", "invoice.paid", "invoice.payment_failed", "invoice.payment_succeeded",
+		"invoice.voided", "invoice.marked_uncollectible", "invoice.deleted", "invoice.updated":
+		if err := wh.refreshStripeInvoice(ctx, event); err != nil {
+			log.Error(err, "refreshing StripeInvoice", "id", event.ID, "type", event.Type)
+			return InternalServerErrorResponse()
+		}
 		return OkResponse()
 	default:
 		log.V(1).Info("ignoring unhandled event", "type", event.Type, "id", event.ID)

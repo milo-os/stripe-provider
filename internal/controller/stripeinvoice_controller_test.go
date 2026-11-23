@@ -27,13 +27,43 @@ import (
 
 // fakeInvoicer stands in for Stripe's invoice calls.
 type fakeInvoicer struct {
-	mu       sync.Mutex
-	previews []stripeinternal.InvoiceDraft
-	drafts   []stripeinternal.InvoiceDraft
-	deleted  []string
-	result   stripeinternal.InvoiceResult
-	err      error
-	delErr   error
+	mu        sync.Mutex
+	previews  []stripeinternal.InvoiceDraft
+	drafts    []stripeinternal.InvoiceDraft
+	finalized []string
+	deleted   []string
+	result    stripeinternal.InvoiceResult
+	// stored is the invoice as Stripe has it, for RetrieveInvoice; nil is
+	// one Stripe doesn't have.
+	stored *stripeinternal.InvoiceResult
+	err    error
+	delErr error
+}
+
+func (f *fakeInvoicer) FinalizeInvoice(_ context.Context, id, _ string) (*stripeinternal.InvoiceResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.finalized = append(f.finalized, id)
+	if f.err != nil {
+		return nil, f.err
+	}
+	res := f.result
+	res.ID, res.Status, res.Number = id, "open", "DATUM-0042"
+	res.HostedInvoiceURL = "https://invoice.stripe.com/i/" + id
+	res.FinalizedAt = time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	res.AmountRemaining = res.AmountDue
+	f.stored = &res
+	return &res, nil
+}
+
+func (f *fakeInvoicer) RetrieveInvoice(_ context.Context, id string) (*stripeinternal.InvoiceResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stored == nil {
+		return nil, errors.Join(stripeinternal.ErrInvoiceMissing)
+	}
+	res := *f.stored
+	return &res, nil
 }
 
 func (f *fakeInvoicer) PreviewInvoice(_ context.Context, d stripeinternal.InvoiceDraft) (*stripeinternal.InvoiceResult, error) {
@@ -55,7 +85,8 @@ func (f *fakeInvoicer) EnsureDraftInvoice(_ context.Context, _ string, d stripei
 		return &stripeinternal.InvoiceResult{ID: "in_partial"}, f.err
 	}
 	res := f.result
-	res.ID = "in_draft"
+	res.ID, res.Status = "in_draft", "draft"
+	f.stored = &res
 	return &res, nil
 }
 
@@ -350,5 +381,196 @@ var _ = Describe("StripeInvoice", func() {
 		Expect(k8sClient.Create(ctx, ok)).To(Succeed())
 		ok.Spec.Lines[0].Quantity = "2"
 		Expect(apierrors.IsInvalid(k8sClient.Update(ctx, ok))).To(BeTrue(), "spec is immutable")
+	})
+	Context("writing a real invoice", func() {
+		realInvoice := func(name, account, pricing string) *stripev1alpha1.StripeInvoice {
+			inv := invoice(name, account, pricing, stripev1alpha1.StripeInvoicePurposeInvoice)
+			inv.Spec.Lines[0].Tax = nil
+			return inv
+		}
+		condition := func(inv *stripev1alpha1.StripeInvoice, kind string) *metav1.Condition {
+			return apimeta.FindStatusCondition(get(inv).Status.Conditions, kind)
+		}
+
+		It("keeps a draft in step with its lines, then finalizes it", func() {
+			readyCustomer("tyrell")
+			readyProduct("rack-w1")
+			inv := realInvoice("writer", "tyrell", "rack-w1")
+			inv.Spec.Source = &stripev1alpha1.StripeInvoiceSource{System: stripev1alpha1.StripeInvoiceSourceOpenMeter, InvoiceID: "01JDOM"}
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+
+			res, err := reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(invoiceRefreshInterval))
+			Expect(stripe.drafts).To(HaveLen(1))
+			Expect(stripe.drafts[0].Description).To(BeEmpty(), "no preview memo on a real invoice")
+			Expect(stripe.drafts[0].CollectionMethod).To(Equal(stripeinternal.CollectionChargeAutomatically))
+			Expect(stripe.drafts[0].Metadata).To(HaveKeyWithValue(stripeinternal.MetadataPurpose, "Invoice"))
+			Expect(stripe.drafts[0].Metadata).To(HaveKeyWithValue(stripeinternal.MetadataOpenMeterInvoiceID, "01JDOM"))
+			got := get(inv)
+			Expect(got.Status.InvoiceID).To(Equal("in_draft"))
+			Expect(got.Status.State).To(Equal(stripev1alpha1.StripeInvoiceStateDraft))
+			Expect(got.Status.ExpiresAt).To(BeNil(), "an invoice never expires")
+			Expect(controllerutil.ContainsFinalizer(got, StripeInvoiceDraftFinalizer)).To(BeTrue())
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Status).To(Equal(metav1.ConditionTrue))
+			Expect(stripe.finalized).To(BeEmpty(), "not until asked")
+
+			// Unchanged: not written again.
+			_, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts).To(HaveLen(1))
+
+			// OpenMeter changed the draft: the lines are written again.
+			got.Spec.Lines[0].Quantity, got.Spec.Lines[0].Amount = "2", "660.00"
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			stripe.result.Lines[0].Amount = 66000
+			_, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts).To(HaveLen(2))
+			Expect(stripe.drafts[1].Lines[0].Quantity.String()).To(Equal("2"))
+			Expect(stripe.drafts[1].Revision).NotTo(Equal(stripe.drafts[0].Revision), "a rewrite isn't a retry")
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Status).To(Equal(metav1.ConditionTrue))
+
+			got = get(inv)
+			got.Spec.Finalize = true
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			res, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts).To(HaveLen(3), "the draft is checked again just before it's finalized")
+			Expect(stripe.finalized).To(Equal([]string{"in_draft"}))
+			Expect(res.RequeueAfter).To(Equal(invoiceRefreshInterval))
+			got = get(inv)
+			Expect(got.Status.State).To(Equal(stripev1alpha1.StripeInvoiceStateOpen))
+			Expect(got.Status.Number).To(Equal("DATUM-0042"))
+			Expect(got.Status.HostedInvoiceURL).To(Equal("https://invoice.stripe.com/i/in_draft"))
+			Expect(got.Status.FinalizedAt).NotTo(BeNil())
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionFinalized).Status).To(Equal(metav1.ConditionTrue))
+
+			// Stripe reports it paid: read on the next pass, and done.
+			stripe.stored.Status, stripe.stored.PaidAt = "paid", time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC)
+			stripe.stored.AmountPaid, stripe.stored.AmountRemaining = stripe.stored.AmountDue, 0
+			res, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeZero())
+			got = get(inv)
+			Expect(got.Status.State).To(Equal(stripev1alpha1.StripeInvoiceStatePaid))
+			Expect(got.Status.PaidAt).NotTo(BeNil())
+			Expect(got.Status.AmountRemaining).To(Equal("0.00"))
+			Expect(stripe.drafts).To(HaveLen(3), "a finalized invoice's lines are never written again")
+			Expect(stripe.finalized).To(HaveLen(1))
+
+			// Deleting it leaves the bill in Stripe alone.
+			stripe.delErr = errors.Join(stripeinternal.ErrInvoiceNotDraft)
+			Expect(k8sClient.Delete(ctx, got)).To(Succeed())
+			_, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(inv), &stripev1alpha1.StripeInvoice{}))).To(BeTrue())
+		})
+
+		It("sends the invoice, due its net days later, on payment terms", func() {
+			readyCustomer("soylent")
+			readyProduct("rack-w2")
+			ba := &billingv1alpha1.BillingAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "soylent", Namespace: ns},
+				Spec:       billingv1alpha1.BillingAccountSpec{CurrencyCode: "USD"},
+			}
+			Expect(k8sClient.Create(ctx, ba)).To(Succeed())
+			ba.Status.PaymentArrangement = &billingv1alpha1.BillingAccountPaymentArrangement{
+				Name: "soylent-terms", Type: billingv1alpha1.BillingArrangementTypeInvoice,
+				Invoice: &billingv1alpha1.InvoiceArrangementTerms{NetDays: 45},
+			}
+			Expect(k8sClient.Status().Update(ctx, ba)).To(Succeed())
+
+			inv := realInvoice("terms", "soylent", "rack-w2")
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+			_, err := reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts[0].CollectionMethod).To(Equal(stripeinternal.CollectionSendInvoice))
+			Expect(stripe.drafts[0].DaysUntilDue).To(Equal(int64(45)))
+		})
+
+		It("doesn't finalize an invoice whose amounts differ", func() {
+			readyCustomer("oscorp")
+			readyProduct("rack-w3")
+			stripe.result.Lines[0].Amount = 49499
+			inv := realInvoice("differ", "oscorp", "rack-w3")
+			inv.Spec.Finalize = true
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+			_, err := reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			cond := condition(inv, stripev1alpha1.StripeInvoiceConditionSynced)
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("AmountsDiffer"))
+			Expect(stripe.finalized).To(BeEmpty())
+		})
+
+		It("doesn't finalize a draft that changed in Stripe after it was synced", func() {
+			readyCustomer("massive")
+			readyProduct("rack-w6")
+			inv := realInvoice("tampered", "massive", "rack-w6")
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+			_, err := reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Status).To(Equal(metav1.ConditionTrue))
+
+			// Someone edits the draft in the Stripe dashboard, and the
+			// rewrite can't put it right.
+			stripe.result.Lines[0].Amount = 49499
+			got := get(inv)
+			got.Spec.Finalize = true
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			_, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stripe.drafts).To(HaveLen(2))
+			Expect(condition(inv, stripev1alpha1.StripeInvoiceConditionSynced).Reason).To(Equal("AmountsDiffer"))
+			Expect(stripe.finalized).To(BeEmpty())
+		})
+
+		It("says when payment failed, and when its draft was deleted in Stripe", func() {
+			readyCustomer("cyber")
+			readyProduct("rack-w4")
+			inv := realInvoice("failing", "cyber", "rack-w4")
+			inv.Spec.Finalize = true
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+			_, err := reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			stripe.stored.AttemptCount = 1
+			stripe.stored.NextPaymentAttempt = time.Date(2027, 1, 4, 0, 0, 0, 0, time.UTC)
+			_, err = reconcileInvoice(inv)
+			Expect(err).NotTo(HaveOccurred())
+			cond := condition(inv, stripev1alpha1.StripeInvoiceConditionPaymentFailed)
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Message).To(ContainSubstring("2027-01-04"))
+
+			readyCustomer("deleted")
+			readyProduct("rack-w5")
+			gone := realInvoice("gone", "deleted", "rack-w5")
+			Expect(k8sClient.Create(ctx, gone)).To(Succeed())
+			_, err = reconcileInvoice(gone)
+			Expect(err).NotTo(HaveOccurred())
+			stripe.stored = nil
+			_, err = reconcileInvoice(gone)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(get(gone).Status.State).To(Equal(stripev1alpha1.StripeInvoiceStateDeleted))
+			Expect(condition(gone, stripev1alpha1.StripeInvoiceConditionSynced).Reason).To(Equal("Deleted"))
+		})
+
+		It("lets an invoice's lines change until it's finalized", func() {
+			inv := realInvoice("rules", "acme", "rack-v1")
+			Expect(k8sClient.Create(ctx, inv)).To(Succeed())
+			inv.Spec.Lines[0].Quantity = "2"
+			Expect(k8sClient.Update(ctx, inv)).To(Succeed())
+			inv.Spec.Finalize = true
+			Expect(k8sClient.Update(ctx, inv)).To(Succeed())
+			inv.Spec.Finalize = false
+			Expect(apierrors.IsInvalid(k8sClient.Update(ctx, inv))).To(BeTrue(), "finalize can't be undone")
+			inv.Spec.Finalize = true
+			inv.Spec.Lines[0].Quantity = "3"
+			Expect(apierrors.IsInvalid(k8sClient.Update(ctx, inv))).To(BeTrue(), "lines can't change once finalize is set")
+
+			preview := invoice("finalize-preview", "acme", "rack-v1", stripev1alpha1.StripeInvoicePurposePreview)
+			preview.Spec.Finalize = true
+			Expect(apierrors.IsInvalid(k8sClient.Create(ctx, preview))).To(BeTrue(), "only an Invoice is finalized")
+		})
 	})
 })

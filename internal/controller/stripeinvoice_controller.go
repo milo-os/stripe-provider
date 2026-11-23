@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -36,8 +37,8 @@ const (
 	// customer or a Product is tried again.
 	stripeInvoiceWaitRequeue = 30 * time.Second
 
-	// StripeInvoiceDraftFinalizer deletes a PreviewDraft's Stripe draft
-	// before the StripeInvoice goes.
+	// StripeInvoiceDraftFinalizer deletes a PreviewDraft's Stripe draft, or
+	// an Invoice's that was never finalized, before the StripeInvoice goes.
 	StripeInvoiceDraftFinalizer = "stripe.billing.miloapis.com/delete-draft"
 
 	// previewDraftMemo is a preview draft's memo, shown to anyone who
@@ -50,6 +51,8 @@ const (
 type stripeInvoicer interface {
 	PreviewInvoice(ctx context.Context, d stripeinternal.InvoiceDraft) (*stripeinternal.InvoiceResult, error)
 	EnsureDraftInvoice(ctx context.Context, existingID string, d stripeinternal.InvoiceDraft) (*stripeinternal.InvoiceResult, error)
+	FinalizeInvoice(ctx context.Context, id, idempotencyKey string) (*stripeinternal.InvoiceResult, error)
+	RetrieveInvoice(ctx context.Context, id string) (*stripeinternal.InvoiceResult, error)
 	DeleteDraftInvoice(ctx context.Context, id string) error
 	DashboardInvoiceURL(id string) string
 }
@@ -79,6 +82,7 @@ type StripeInvoiceReconciler struct {
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeproducts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=servicepricings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *StripeInvoiceReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
@@ -89,6 +93,9 @@ func (r *StripeInvoiceReconciler) Reconcile(ctx context.Context, req reconcile.R
 
 	if !inv.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.finalize(ctx, &inv)
+	}
+	if inv.Spec.Purpose == stripev1alpha1.StripeInvoicePurposeInvoice {
+		return r.reconcileInvoice(ctx, &inv)
 	}
 
 	expiresAt := inv.CreationTimestamp.Add(lifetime(inv.Spec.Purpose))
@@ -194,13 +201,24 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 	draft := &stripeinternal.InvoiceDraft{
 		CustomerID:     customer.Status.StripeCustomerID,
 		Currency:       currency,
-		Description:    previewDraftMemo,
 		IdempotencyKey: "stripeinvoice-" + string(inv.UID),
+		Revision:       strconv.FormatInt(inv.Generation, 10),
 		Metadata: map[string]string{
 			stripeinternal.MetadataStripeInvoice:    inv.Namespace + "/" + inv.Name,
 			stripeinternal.MetadataStripeInvoiceUID: string(inv.UID),
 			stripeinternal.MetadataPurpose:          string(inv.Spec.Purpose),
 		},
+	}
+	switch inv.Spec.Purpose {
+	case stripev1alpha1.StripeInvoicePurposePreviewDraft:
+		draft.Description = previewDraftMemo
+	case stripev1alpha1.StripeInvoicePurposeInvoice:
+		if err := r.setCollection(ctx, inv, draft); err != nil {
+			return nil, nil, err
+		}
+		if src := inv.Spec.Source; src != nil && src.System == stripev1alpha1.StripeInvoiceSourceOpenMeter {
+			draft.Metadata[stripeinternal.MetadataOpenMeterInvoiceID] = src.InvoiceID
+		}
 	}
 	for _, l := range inv.Spec.Lines {
 		productID, sku, waiting, err := r.lineProduct(ctx, l.ServicePricingRef)
@@ -288,8 +306,12 @@ func (r *StripeInvoiceReconciler) finalize(ctx context.Context, inv *stripev1alp
 			if !errors.Is(err, stripeinternal.ErrInvoiceNotDraft) {
 				return err
 			}
-			r.event(inv, "Warning", "DraftNotDeleted",
-				fmt.Sprintf("Preview draft %s was finalized in Stripe, so it can't be deleted; void it there", id))
+			// A finalized invoice is a bill: it's voided by staff in Stripe,
+			// never deleted, and losing its StripeInvoice doesn't change it.
+			if inv.Spec.Purpose != stripev1alpha1.StripeInvoicePurposeInvoice {
+				r.event(inv, "Warning", "DraftNotDeleted",
+					fmt.Sprintf("Preview draft %s was finalized in Stripe, so it can't be deleted; void it there", id))
+			}
 		}
 	}
 	controllerutil.RemoveFinalizer(inv, StripeInvoiceDraftFinalizer)
@@ -367,6 +389,8 @@ func (r *StripeInvoiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("stripeinvoice").
+		// Every change, metadata included: Stripe's invoice events touch the
+		// refresh annotation to have an invoice read again.
 		For(&stripev1alpha1.StripeInvoice{}).
 		Complete(r)
 }
