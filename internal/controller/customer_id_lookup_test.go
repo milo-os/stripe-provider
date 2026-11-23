@@ -420,8 +420,8 @@ var _ = Describe("buildCustomerDetails address", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(d.Address.Country).To(Equal("GB"), "the account's own address wins")
 
-		// A country alone, as staging's ba-mc-corp-7992kg had, can't place
-		// a US customer for tax: the card's address does.
+		// An account with only a country can't place a US customer for
+		// tax: the card's address does.
 		ba.Spec.ContactInfo.Address = &billingv1alpha1.BillingAddress{Country: "US"}
 		d, err = buildCustomerDetails(ctx, k8sClient, ba)
 		Expect(err).NotTo(HaveOccurred())
