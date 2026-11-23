@@ -275,10 +275,8 @@ Reconciles `StripeInvoice`s with `purpose: Invoice`. On each pass:
 5. **Check amounts.** See [Checking amounts](#checking-amounts). `Synced`
    becomes True only when they match.
 6. **Finalize** when `spec.finalize` is true. The draft is updated with
-   `automatic_tax.enabled` first, so Stripe works its tax out again: a draft
-   keeps the tax worked out when it last changed, and one written before its
-   customer had an address is otherwise refused (`customer_tax_location_invalid`)
-   for good. Steps 3 to 5 run once more
+   `automatic_tax.enabled` first, so Stripe works its tax out again from the
+   customer as it is now. Steps 3 to 5 run once more
    first, even if the spec hasn't changed, so an item someone added to or
    removed from the draft in the Stripe dashboard is put right rather than
    billed; an item without a current `datum_line_key` is deleted. If
@@ -498,7 +496,9 @@ Previews have no PDF or hosted page in Stripe. The staff portal renders
   `AmountsDiffer`, and the invoice isn't finalized until the key expires or
   the spec changes.
 - **Finalizing** is safe to repeat: Stripe refuses to finalize twice, and the
-  controller reads the state back.
+  controller reads the state back. It carries no idempotency key: Stripe
+  replays a keyed request's result, a refusal included, for 24 hours, so a
+  draft refused once would stay refused after its cause was fixed.
 - **Stripe errors.** Rate limits and 5xx requeue with backoff. A 4xx sets a
   condition with Stripe's message and stops until the spec changes.
 - **stripe-provider down.** OpenMeter holds drafts until they're synced, so

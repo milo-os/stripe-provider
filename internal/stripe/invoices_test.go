@@ -367,13 +367,19 @@ func TestEnsureDraftInvoice_RewritesChangedLinesAndRemovesOldOnes(t *testing.T) 
 
 func TestFinalizeInvoice(t *testing.T) {
 	f := &fakeInvoices{invoice: `{"id":"in_1","object":"invoice","status":"draft"}`}
-	res, err := newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1", "stripeinvoice-uid-1")
+	res, err := newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1")
 	if err != nil {
 		t.Fatalf("FinalizeInvoice: %v", err)
 	}
 	calls := f.find(http.MethodPost, "/v1/invoices/in_1/finalize")
 	if len(calls) != 1 || calls[0].form.Get("auto_advance") != "true" {
 		t.Fatalf("finalize calls = %v, want one with auto_advance so Stripe charges or sends it", calls)
+	}
+	// Not keyed by the invoice: Stripe would replay a refusal for 24 hours,
+	// after its cause was put right. stripe-go's own per-call key, for its
+	// retries within the call, is new each time.
+	if strings.HasPrefix(calls[0].idempotency, "stripeinvoice-") {
+		t.Errorf("finalize sent idempotency key %q, which repeats across attempts", calls[0].idempotency)
 	}
 	// The draft is updated first, so Stripe works its tax out again: a
 	// customer may have gained an address since it was written.
@@ -390,7 +396,7 @@ func TestFinalizeInvoice(t *testing.T) {
 
 	// Already finalized: just read.
 	f = &fakeInvoices{invoice: `{"id":"in_1","object":"invoice","status":"paid","number":"DATUM-0042"}`}
-	res, err = newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1", "stripeinvoice-uid-1")
+	res, err = newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1")
 	if err != nil || res.Status != "paid" || len(f.find(http.MethodPost, "/v1/invoices/in_1/finalize")) != 0 ||
 		len(f.find(http.MethodPost, "/v1/invoices/in_1")) != 0 {
 		t.Errorf("finalizing a paid invoice: %+v, %v", res, err)
