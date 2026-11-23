@@ -377,3 +377,53 @@ func ensureNamespace(name string) {
 		Expect(err).NotTo(HaveOccurred())
 	}
 }
+
+var _ = Describe("buildCustomerDetails address", func() {
+	It("takes the default card's billing address when the account has none, and the account's own when it has one", func() {
+		ns := "default"
+		pm := &billingv1alpha1.PaymentMethod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pm-card-address", Namespace: ns},
+			Spec: billingv1alpha1.PaymentMethodSpec{
+				BillingAccountRef:     billingv1alpha1.BillingAccountRef{Name: "ba-card-address"},
+				DisplayName:           "Card",
+				PaymentMethodClassRef: &billingv1alpha1.PaymentMethodClassRef{Name: "stripe-default"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pm)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pm) })
+		pm.Status.Details = &billingv1alpha1.PaymentMethodDetails{
+			Type: billingv1alpha1.PaymentMethodInstrumentType("card"),
+			Card: &billingv1alpha1.PaymentMethodCardDetails{
+				Brand: "visa", Last4: "4242", Country: "US", ExpiryMonth: 12, ExpiryYear: 2030,
+				BillingAddress: &billingv1alpha1.CardBillingAddress{Country: "US", PostalCode: "94107"},
+			},
+		}
+		Expect(k8sClient.Status().Update(ctx, pm)).To(Succeed())
+
+		ba := &billingv1alpha1.BillingAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "ba-card-address", Namespace: ns},
+			Spec: billingv1alpha1.BillingAccountSpec{
+				CurrencyCode:            "USD",
+				ContactInfo:             &billingv1alpha1.BillingContactInfo{Email: "card@example.com"},
+				DefaultPaymentMethodRef: &billingv1alpha1.DefaultPaymentMethodRef{Name: pm.Name},
+			},
+		}
+
+		d, err := buildCustomerDetails(ctx, k8sClient, ba)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.Address).NotTo(BeNil(), "Stripe Tax needs a location: the card's stands in")
+		Expect(d.Address.Country).To(Equal("US"))
+		Expect(d.Address.PostalCode).To(Equal("94107"))
+
+		ba.Spec.ContactInfo.Address = &billingv1alpha1.BillingAddress{Country: "GB", Line1: "1 High St", City: "London", PostalCode: "N1 1AA"}
+		d, err = buildCustomerDetails(ctx, k8sClient, ba)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.Address.Country).To(Equal("GB"), "the account's own address wins")
+
+		ba.Spec.ContactInfo.Address = nil
+		ba.Spec.DefaultPaymentMethodRef = nil
+		d, err = buildCustomerDetails(ctx, k8sClient, ba)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.Address).To(BeNil())
+	})
+})
