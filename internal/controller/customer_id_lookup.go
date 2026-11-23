@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,15 +33,18 @@ func buildCustomerDetails(
 	d := customerDetailsFromBillingAccount(ba)
 
 	// Stripe Tax needs the customer's location to finalize an invoice. An
-	// account paying by card often has no address of its own, since the
-	// card form asked for one: the default card's billing address stands in
-	// until the account gives its own, which then replaces it.
-	if d.Address == nil {
+	// account paying by card often has no address of its own, or only a
+	// country, since the card form asked for the address instead: the
+	// default card's billing address stands in until the account gives one
+	// Stripe can place, which then replaces it.
+	if !locatesCustomer(d.Address) {
 		address, err := defaultCardBillingAddress(ctx, c, ba)
 		if err != nil {
 			return d, err
 		}
-		d.Address = address
+		if address != nil && (d.Address == nil || locatesCustomer(address)) {
+			d.Address = address
+		}
 	}
 
 	defaultPMID, err := findDefaultStripePaymentMethodID(ctx, c, ba)
@@ -147,6 +151,15 @@ func findDefaultStripePaymentMethodID(
 		return "", fmt.Errorf("getting StripePaymentMethod %q for default ref: %w", ref.Name, err)
 	}
 	return spm.Status.StripePaymentMethodID, nil
+}
+
+// locatesCustomer reports whether an address is enough for Stripe Tax to
+// place the customer: a country and a postal code. Stripe needs the
+// postal code for the US and Canada; asking it everywhere keeps the rule
+// simple, and an address without one still stands when no card has
+// better.
+func locatesCustomer(a *stripeinternal.CustomerAddress) bool {
+	return a != nil && a.Country != "" && strings.TrimSpace(a.PostalCode) != ""
 }
 
 // defaultCardBillingAddress is the billing address of the account's
