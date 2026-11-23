@@ -10,7 +10,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/stripe/stripe-go/v87 v87.1.0
-	go.miloapis.com/billing v0.10.1-0.20261120155424-f1f462bde28b
+	go.miloapis.com/billing v0.12.1-0.20261123143003-98d9253946b1
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2
