@@ -375,6 +375,15 @@ func TestFinalizeInvoice(t *testing.T) {
 	if len(calls) != 1 || calls[0].form.Get("auto_advance") != "true" {
 		t.Fatalf("finalize calls = %v, want one with auto_advance so Stripe charges or sends it", calls)
 	}
+	// The draft is updated first, so Stripe works its tax out again: a
+	// customer may have gained an address since it was written.
+	updates := f.find(http.MethodPost, "/v1/invoices/in_1")
+	if len(updates) != 1 || updates[0].form.Get("automatic_tax[enabled]") != "true" {
+		t.Errorf("updates before finalizing = %v, want one turning automatic tax on", updates)
+	}
+	if len(f.requests) < 2 || f.requests[len(f.requests)-2].path != "/v1/invoices/in_1" {
+		t.Errorf("the tax update should come just before finalizing: %v", f.requests)
+	}
 	if res.Status != "open" || res.Number != "DATUM-0042" || res.HostedInvoiceURL == "" || res.FinalizedAt.IsZero() {
 		t.Errorf("result = %+v", res)
 	}
@@ -382,7 +391,8 @@ func TestFinalizeInvoice(t *testing.T) {
 	// Already finalized: just read.
 	f = &fakeInvoices{invoice: `{"id":"in_1","object":"invoice","status":"paid","number":"DATUM-0042"}`}
 	res, err = newInvoicesClient(t, f).FinalizeInvoice(context.Background(), "in_1", "stripeinvoice-uid-1")
-	if err != nil || res.Status != "paid" || len(f.find(http.MethodPost, "/v1/invoices/in_1/finalize")) != 0 {
+	if err != nil || res.Status != "paid" || len(f.find(http.MethodPost, "/v1/invoices/in_1/finalize")) != 0 ||
+		len(f.find(http.MethodPost, "/v1/invoices/in_1")) != 0 {
 		t.Errorf("finalizing a paid invoice: %+v, %v", res, err)
 	}
 }
