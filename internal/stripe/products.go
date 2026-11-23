@@ -21,6 +21,9 @@ type ProductDetails struct {
 	// TaxCode is the Product's Stripe tax code, or "" for the account's
 	// default.
 	TaxCode string
+	// Description is the Product's description, "" for none. Nil leaves
+	// whatever the Product has.
+	Description *string
 	// Active is false for a Product nothing sells any more.
 	Active bool
 	// Metadata is stamped on the Product. Keys already on the Product and
@@ -54,6 +57,9 @@ func (c *Client) createProduct(ctx context.Context, d ProductDetails) error {
 	if d.TaxCode != "" {
 		params.TaxCode = stripego.String(d.TaxCode)
 	}
+	if d.Description != nil && *d.Description != "" {
+		params.Description = d.Description
+	}
 	_, err := c.api.V1Products.Create(ctx, params)
 	var stripeErr *stripego.Error
 	if errors.As(err, &stripeErr) && stripeErr.Code == stripego.ErrorCodeResourceAlreadyExists {
@@ -80,6 +86,15 @@ func (c *Client) updateProduct(ctx context.Context, existing *stripego.Product, 
 	}
 	if existing.Active != d.Active {
 		params.Active = stripego.Bool(d.Active)
+		changed = true
+	}
+	switch {
+	case d.Description == nil || *d.Description == existing.Description:
+	case *d.Description == "":
+		params.UnsetFields = append(params.UnsetFields, stripego.ProductUpdateParamsUnsetFieldDescription)
+		changed = true
+	default:
+		params.Description = d.Description
 		changed = true
 	}
 	switch current := productTaxCode(existing); {
