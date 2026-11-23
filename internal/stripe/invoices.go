@@ -97,8 +97,11 @@ type InvoiceLine struct {
 	UnitAmount decimal.Decimal
 	// Start and End are the service period, both included.
 	Start, End time.Time
-	// TaxCode overrides the Product's tax code when set.
+	// TaxCode is the line's tax code, when it has its own.
 	TaxCode string
+	// ProductTaxCode is the Product's tax code, "" for the account's
+	// default. A line whose TaxCode is the same is taxed as its Product.
+	ProductTaxCode string
 	// DiscountPercent is taken off the line when positive.
 	DiscountPercent decimal.Decimal
 	// Note is for staff, kept in the item's metadata.
@@ -106,6 +109,34 @@ type InvoiceLine struct {
 	// Metadata is stamped on the item, each key prefixed "datum_", with
 	// the line's key.
 	Metadata map[string]string
+}
+
+// taxOverride is the tax code the line is taxed by in place of its
+// Product's, or "" when it's taxed as its Product is.
+//
+// Stripe takes a tax code on an invoice item only without price_data, and
+// price_data is what names the item's Product. So a line taxed as its
+// Product (nearly every line: its pricing gives both) is written with its
+// Product, and a line with a code of its own is written without one, its
+// Product kept in its metadata as datum_product.
+func (l InvoiceLine) taxOverride() string {
+	if l.TaxCode == "" || l.TaxCode == l.ProductTaxCode {
+		return ""
+	}
+	return l.TaxCode
+}
+
+// ErrorMessage is err's text with any Stripe error in it cut down to
+// Stripe's own message. The full error carries a request ID and log link
+// that differ on every attempt, so a status condition holding it would
+// change, and requeue its object at once, each time the same call failed.
+func ErrorMessage(err error) string {
+	msg := err.Error()
+	var se *stripego.Error
+	if errors.As(err, &se) && se.Msg != "" {
+		msg = strings.Replace(msg, se.Error(), se.Msg, 1)
+	}
+	return msg
 }
 
 // InvoiceResult is Stripe's working of an invoice, in minor units.
@@ -156,13 +187,7 @@ func (c *Client) PreviewInvoice(ctx context.Context, d InvoiceDraft) (*InvoiceRe
 	}
 	for _, l := range d.Lines {
 		item := &stripego.InvoiceCreatePreviewInvoiceItemParams{
-			Description: stripego.String(l.Description),
-			PriceData: &stripego.InvoiceCreatePreviewInvoiceItemPriceDataParams{
-				Currency:          stripego.String(strings.ToLower(d.Currency)),
-				Product:           stripego.String(l.ProductID),
-				TaxBehavior:       stripego.String("exclusive"),
-				UnitAmountDecimal: ptrDecimal(minorUnits(l.UnitAmount)),
-			},
+			Description:     stripego.String(l.Description),
 			QuantityDecimal: ptrDecimal(l.Quantity),
 			Period: &stripego.InvoiceCreatePreviewInvoiceItemPeriodParams{
 				Start: stripego.Int64(l.Start.Unix()),
@@ -170,8 +195,17 @@ func (c *Client) PreviewInvoice(ctx context.Context, d InvoiceDraft) (*InvoiceRe
 			},
 			Metadata: lineMetadata(l),
 		}
-		if l.TaxCode != "" {
-			item.TaxCode = stripego.String(l.TaxCode)
+		if code := l.taxOverride(); code != "" {
+			item.UnitAmountDecimal = ptrDecimal(minorUnits(l.UnitAmount))
+			item.TaxBehavior = stripego.String("exclusive")
+			item.TaxCode = stripego.String(code)
+		} else {
+			item.PriceData = &stripego.InvoiceCreatePreviewInvoiceItemPriceDataParams{
+				Currency:          stripego.String(strings.ToLower(d.Currency)),
+				Product:           stripego.String(l.ProductID),
+				TaxBehavior:       stripego.String("exclusive"),
+				UnitAmountDecimal: ptrDecimal(minorUnits(l.UnitAmount)),
+			}
 		}
 		if l.DiscountPercent.IsPositive() {
 			coupon, err := c.ensureCoupon(ctx, l.DiscountPercent)
@@ -310,15 +344,9 @@ func (c *Client) syncLines(ctx context.Context, id string, d InvoiceDraft) error
 			continue
 		}
 		item := &stripego.InvoiceItemCreateParams{
-			Customer:    stripego.String(d.CustomerID),
-			Invoice:     stripego.String(id),
-			Description: stripego.String(l.Description),
-			PriceData: &stripego.InvoiceItemCreatePriceDataParams{
-				Currency:          stripego.String(strings.ToLower(d.Currency)),
-				Product:           stripego.String(l.ProductID),
-				TaxBehavior:       stripego.String("exclusive"),
-				UnitAmountDecimal: ptrDecimal(minorUnits(l.UnitAmount)),
-			},
+			Customer:        stripego.String(d.CustomerID),
+			Invoice:         stripego.String(id),
+			Description:     stripego.String(l.Description),
 			QuantityDecimal: ptrDecimal(l.Quantity),
 			Period: &stripego.InvoiceItemCreatePeriodParams{
 				Start: stripego.Int64(l.Start.Unix()),
@@ -326,8 +354,17 @@ func (c *Client) syncLines(ctx context.Context, id string, d InvoiceDraft) error
 			},
 			Metadata: lineMetadata(l),
 		}
-		if l.TaxCode != "" {
-			item.TaxCode = stripego.String(l.TaxCode)
+		if code := l.taxOverride(); code != "" {
+			item.UnitAmountDecimal = ptrDecimal(minorUnits(l.UnitAmount))
+			item.TaxBehavior = stripego.String("exclusive")
+			item.TaxCode = stripego.String(code)
+		} else {
+			item.PriceData = &stripego.InvoiceItemCreatePriceDataParams{
+				Currency:          stripego.String(strings.ToLower(d.Currency)),
+				Product:           stripego.String(l.ProductID),
+				TaxBehavior:       stripego.String("exclusive"),
+				UnitAmountDecimal: ptrDecimal(minorUnits(l.UnitAmount)),
+			}
 		}
 		if l.DiscountPercent.IsPositive() {
 			coupon, err := c.ensureCoupon(ctx, l.DiscountPercent)
@@ -514,6 +551,10 @@ func (c *Client) ensureCoupon(ctx context.Context, percent decimal.Decimal) (str
 
 func lineMetadata(l InvoiceLine) map[string]string {
 	md := map[string]string{MetadataLineKey: l.Key, MetadataLineHash: l.hash()}
+	if l.taxOverride() != "" {
+		// Written without price_data, so without its Product: kept here.
+		md["datum_product"] = l.ProductID
+	}
 	for k, v := range l.Metadata {
 		md["datum_"+k] = v
 	}

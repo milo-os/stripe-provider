@@ -145,7 +145,7 @@ func (r *StripeInvoiceReconciler) Reconcile(ctx context.Context, req reconcile.R
 				// Recorded so the finalizer deletes a half-made draft.
 				s.InvoiceID = result.ID
 			}
-			r.setReady(s, &inv, metav1.ConditionFalse, "StripeError", err.Error())
+			r.setReady(s, &inv, metav1.ConditionFalse, "StripeError", stripeinternal.ErrorMessage(err))
 		})
 		return ctrl.Result{}, errors.Join(err, statusErr)
 	}
@@ -221,7 +221,7 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 		}
 	}
 	for _, l := range inv.Spec.Lines {
-		productID, sku, waiting, err := r.lineProduct(ctx, l.ServicePricingRef)
+		productID, productTaxCode, sku, waiting, err := r.lineProduct(ctx, l.ServicePricingRef)
 		if err != nil || waiting != nil {
 			return nil, waiting, err
 		}
@@ -238,12 +238,15 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 			Key:         l.Key,
 			Description: l.Description,
 			ProductID:   productID,
-			Quantity:    decimal.RequireFromString(l.Quantity),
-			UnitAmount:  decimal.RequireFromString(l.UnitAmount),
-			Start:       l.Period.Start.Time,
-			End:         l.Period.End.Time,
-			Note:        l.Note,
-			Metadata:    metadata,
+			// A line whose tax code is its Product's is written with the
+			// Product; Stripe won't take a code alongside it.
+			ProductTaxCode: productTaxCode,
+			Quantity:       decimal.RequireFromString(l.Quantity),
+			UnitAmount:     decimal.RequireFromString(l.UnitAmount),
+			Start:          l.Period.Start.Time,
+			End:            l.Period.End.Time,
+			Note:           l.Note,
+			Metadata:       metadata,
 		}
 		if t := l.Tax; t != nil {
 			switch {
@@ -263,7 +266,7 @@ func (r *StripeInvoiceReconciler) invoiceDraft(ctx context.Context, inv *stripev
 
 // lineProduct is the Stripe Product of a pricing, its StripeProduct's, and
 // the pricing's SKU.
-func (r *StripeInvoiceReconciler) lineProduct(ctx context.Context, ref stripev1alpha1.ServicePricingRef) (string, string, *waitReason, error) {
+func (r *StripeInvoiceReconciler) lineProduct(ctx context.Context, ref stripev1alpha1.ServicePricingRef) (string, string, string, *waitReason, error) {
 	ns := ref.Namespace
 	if ns == "" {
 		ns = billingv1alpha1.DefaultServicePricingNamespace
@@ -271,23 +274,23 @@ func (r *StripeInvoiceReconciler) lineProduct(ctx context.Context, ref stripev1a
 	var sp billingv1alpha1.ServicePricing
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &sp); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s/%s doesn't exist", ns, ref.Name)}, nil
+			return "", "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s/%s doesn't exist", ns, ref.Name)}, nil
 		}
-		return "", "", nil, fmt.Errorf("getting ServicePricing %s/%s: %w", ns, ref.Name, err)
+		return "", "", "", nil, fmt.Errorf("getting ServicePricing %s/%s: %w", ns, ref.Name, err)
 	}
 	var product stripev1alpha1.StripeProduct
 	name := stripeProductName(&sp)
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &product); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s has no StripeProduct yet", ref.Name)}, nil
+			return "", "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("ServicePricing %s has no StripeProduct yet", ref.Name)}, nil
 		}
-		return "", "", nil, fmt.Errorf("getting StripeProduct %s: %w", name, err)
+		return "", "", "", nil, fmt.Errorf("getting StripeProduct %s: %w", name, err)
 	}
 	if product.Status.ProductID == "" ||
 		!apimeta.IsStatusConditionTrue(product.Status.Conditions, stripev1alpha1.StripeProductConditionReady) {
-		return "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("StripeProduct %s isn't ready", name)}, nil
+		return "", "", "", &waitReason{"WaitingForProduct", fmt.Sprintf("StripeProduct %s isn't ready", name)}, nil
 	}
-	return product.Status.ProductID, sp.Spec.SKU, nil, nil
+	return product.Status.ProductID, product.Status.TaxCode, sp.Spec.SKU, nil, nil
 }
 
 // finalize deletes a PreviewDraft's Stripe draft, then lets the
