@@ -399,6 +399,16 @@ func (c *Client) FinalizeInvoice(ctx context.Context, id, idempotencyKey string)
 		return nil, fmt.Errorf("retrieving Stripe invoice %s: %w", id, err)
 	}
 	if inv.Status == stripego.InvoiceStatusDraft {
+		// A draft keeps the tax Stripe worked out when it last changed: one
+		// written while its customer had no address stays without a tax
+		// location, and Stripe refuses to finalize it
+		// (customer_tax_location_invalid) even once the customer has one.
+		// Updating the draft has Stripe work its tax out again.
+		if _, err := c.api.V1Invoices.Update(ctx, id, &stripego.InvoiceUpdateParams{
+			AutomaticTax: &stripego.InvoiceUpdateAutomaticTaxParams{Enabled: stripego.Bool(true)},
+		}); err != nil {
+			return nil, fmt.Errorf("recalculating tax on Stripe invoice %s: %w", id, err)
+		}
 		params := &stripego.InvoiceFinalizeInvoiceParams{AutoAdvance: stripego.Bool(true)}
 		params.SetIdempotencyKey(idempotencyKey + "-finalize")
 		inv, err = c.api.V1Invoices.FinalizeInvoice(ctx, id, params)

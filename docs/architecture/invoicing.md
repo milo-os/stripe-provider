@@ -274,7 +274,11 @@ Reconciles `StripeInvoice`s with `purpose: Invoice`. On each pass:
    status.
 5. **Check amounts.** See [Checking amounts](#checking-amounts). `Synced`
    becomes True only when they match.
-6. **Finalize** when `spec.finalize` is true. Steps 3 to 5 run once more
+6. **Finalize** when `spec.finalize` is true. The draft is updated with
+   `automatic_tax.enabled` first, so Stripe works its tax out again: a draft
+   keeps the tax worked out when it last changed, and one written before its
+   customer had an address is otherwise refused (`customer_tax_location_invalid`)
+   for good. Steps 3 to 5 run once more
    first, even if the spec hasn't changed, so an item someone added to or
    removed from the draft in the Stripe dashboard is put right rather than
    billed; an item without a current `datum_line_key` is deleted. If
