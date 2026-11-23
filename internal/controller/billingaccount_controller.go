@@ -259,7 +259,24 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&stripev1alpha1.StripePaymentMethod{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueBillingAccountForStripePaymentMethod),
 		).
+		// The card's billing address lands on the PaymentMethod's status,
+		// after the StripePaymentMethod's: the customer takes it when the
+		// account has no address of its own (see buildCustomerDetails).
+		Watches(
+			&billingv1alpha1.PaymentMethod{},
+			handler.EnqueueRequestsFromMapFunc(enqueueBillingAccountForPaymentMethod),
+		).
 		Complete(r)
+}
+
+// enqueueBillingAccountForPaymentMethod maps a PaymentMethod to its
+// BillingAccount, in the same namespace.
+func enqueueBillingAccountForPaymentMethod(_ context.Context, obj client.Object) []reconcile.Request {
+	pm, ok := obj.(*billingv1alpha1.PaymentMethod)
+	if !ok || pm.Spec.BillingAccountRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pm.Namespace, Name: pm.Spec.BillingAccountRef.Name}}}
 }
 
 // invoiceArrangementChanged passes BillingAccount updates that start or

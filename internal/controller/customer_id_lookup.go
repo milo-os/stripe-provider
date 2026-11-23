@@ -31,6 +31,18 @@ func buildCustomerDetails(
 ) (stripeinternal.CustomerDetails, error) {
 	d := customerDetailsFromBillingAccount(ba)
 
+	// Stripe Tax needs the customer's location to finalize an invoice. An
+	// account paying by card often has no address of its own, since the
+	// card form asked for one: the default card's billing address stands in
+	// until the account gives its own, which then replaces it.
+	if d.Address == nil {
+		address, err := defaultCardBillingAddress(ctx, c, ba)
+		if err != nil {
+			return d, err
+		}
+		d.Address = address
+	}
+
 	defaultPMID, err := findDefaultStripePaymentMethodID(ctx, c, ba)
 	if err != nil {
 		return d, fmt.Errorf("looking up default Stripe PaymentMethod: %w", err)
@@ -135,6 +147,40 @@ func findDefaultStripePaymentMethodID(
 		return "", fmt.Errorf("getting StripePaymentMethod %q for default ref: %w", ref.Name, err)
 	}
 	return spm.Status.StripePaymentMethodID, nil
+}
+
+// defaultCardBillingAddress is the billing address of the account's
+// default payment method, as the card form took it, or nil when it has
+// none (or no country, which Stripe Tax needs at least).
+func defaultCardBillingAddress(
+	ctx context.Context,
+	c client.Client,
+	ba *billingv1alpha1.BillingAccount,
+) (*stripeinternal.CustomerAddress, error) {
+	ref := ba.Spec.DefaultPaymentMethodRef
+	if ref == nil || ref.Name == "" {
+		return nil, nil
+	}
+	var pm billingv1alpha1.PaymentMethod
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ba.Namespace, Name: ref.Name}, &pm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting default PaymentMethod %q: %w", ref.Name, err)
+	}
+	details := pm.Status.Details
+	if details == nil || details.Card == nil || details.Card.BillingAddress == nil || details.Card.BillingAddress.Country == "" {
+		return nil, nil
+	}
+	a := details.Card.BillingAddress
+	return &stripeinternal.CustomerAddress{
+		Country:    a.Country,
+		Line1:      a.Line1,
+		Line2:      a.Line2,
+		City:       a.City,
+		State:      a.Region,
+		PostalCode: a.PostalCode,
+	}, nil
 }
 
 func findExistingCustomerID(

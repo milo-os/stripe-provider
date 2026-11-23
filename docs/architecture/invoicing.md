@@ -385,8 +385,15 @@ don't print metadata.
 ### Tax
 
 - The invoice has `automatic_tax.enabled`. Stripe Tax uses the customer's
-  address, tax IDs and exemption from the `StripeCustomer`.
-- `tax_code` on the item: `tax.code`, or the Product's when empty.
+  address, tax IDs and exemption from the `StripeCustomer`. Stripe won't
+  finalize an invoice without the customer's location
+  (`customer_tax_location_invalid`), so an account with no address of its
+  own, as is usual for one paying by card, gives its customer the default
+  card's billing address until it has one.
+- A line taxed as its Product, nearly every line, is written with the
+  Product and no `tax_code`. A line with a code of its own (`tax.code`) is
+  written with that `tax_code` and no Product, which Stripe takes only
+  without `price_data`; its Product is kept in `datum_product` metadata.
 - `tax.taxable: false` writes Stripe's nontaxable code (`txcd_00000000`)
   instead.
 - Tax location by facility isn't supported. Every line is taxed at the
