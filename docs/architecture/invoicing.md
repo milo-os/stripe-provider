@@ -387,9 +387,10 @@ don't print metadata.
 - The invoice has `automatic_tax.enabled`. Stripe Tax uses the customer's
   address, tax IDs and exemption from the `StripeCustomer`. Stripe won't
   finalize an invoice without the customer's location
-  (`customer_tax_location_invalid`), so an account with no address of its
-  own, as is usual for one paying by card, gives its customer the default
-  card's billing address until it has one.
+  (`customer_tax_location_invalid`), and needs a postal code to place a US
+  or Canadian customer. So an account whose own address has no postal code,
+  or no address at all, as is usual for one paying by card, gives its
+  customer the default card's billing address until it has one.
 - A line taxed as its Product, nearly every line, is written with the
   Product and no `tax_code`. A line with a code of its own (`tax.code`) is
   written with that `tax_code` and no Product, which Stripe takes only
