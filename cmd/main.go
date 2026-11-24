@@ -18,6 +18,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -82,6 +83,7 @@ func main() {
 		LeaderElectionConfig:          leaderElectionRestConfig(cfg),
 		LeaderElectionReleaseOnCancel: true,
 		WebhookServer:                 webhook.NewServer(webhookOpts),
+		Controller:                    config.Controller{ReconciliationTimeout: reconcileTimeout},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -135,6 +137,15 @@ func main() {
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	milo := newMiloCheck(mgr.GetAPIReader(), providerConfigName)
+	if err := mgr.Add(milo); err != nil {
+		setupLog.Error(err, "unable to start Milo health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddHealthzCheck("milo", milo.Check); err != nil {
+		setupLog.Error(err, "unable to set up Milo health check")
 		os.Exit(1)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
