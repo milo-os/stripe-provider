@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,10 +15,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// stubReader answers every Get with err.
-type stubReader struct{ err error }
+// stubReader answers every Get with err, and counts the calls.
+type stubReader struct {
+	err   error
+	calls atomic.Int32
+}
 
 func (r *stubReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	r.calls.Add(1)
 	return r.err
 }
 
@@ -34,8 +39,10 @@ func TestMiloCheck(t *testing.T) {
 	c := newMiloCheck(reader, "default")
 	c.now = func() time.Time { return now }
 	c.lastOK = now
+	ctx := context.Background()
 	check := func() error { return c.Check(httptest.NewRequest("GET", "/healthz", nil)) }
 
+	c.probe(ctx)
 	if err := check(); err != nil {
 		t.Fatalf("Milo answering: %v", err)
 	}
@@ -47,6 +54,7 @@ func TestMiloCheck(t *testing.T) {
 	} {
 		reader.err = refusal
 		now = now.Add(time.Hour)
+		c.probe(ctx)
 		if err := check(); err != nil {
 			t.Errorf("%s from Milo: %v, want healthy", name, err)
 		}
@@ -54,21 +62,71 @@ func TestMiloCheck(t *testing.T) {
 
 	reader.err = context.DeadlineExceeded
 	now = now.Add(miloUnreachableAfter / 2)
+	c.probe(ctx)
 	if err := check(); err != nil {
 		t.Errorf("unanswered for a short while: %v, want healthy", err)
 	}
 	now = now.Add(miloUnreachableAfter)
+	c.probe(ctx)
 	if err := check(); err == nil {
 		t.Error("unanswered past miloUnreachableAfter: healthy, want an error")
 	}
 
 	reader.err = apierrors.NewTimeoutError("slow", 1)
+	c.probe(ctx)
 	if err := check(); err == nil {
 		t.Error("a timeout from Milo counted as an answer")
 	}
 
 	reader.err = nil
+	c.probe(ctx)
 	if err := check(); err != nil {
 		t.Errorf("Milo answering again: %v", err)
+	}
+}
+
+// TestMiloCheckDoesNotCallMilo checks a probe answers from the last result
+// without a request of its own, so a slow Milo can't outlast the kubelet's
+// probe timeout.
+func TestMiloCheckDoesNotCallMilo(t *testing.T) {
+	reader := &stubReader{}
+	c := newMiloCheck(reader, "default")
+	for range 3 {
+		if err := c.Check(httptest.NewRequest("GET", "/healthz", nil)); err != nil {
+			t.Fatalf("check: %v", err)
+		}
+	}
+	if n := reader.calls.Load(); n != 0 {
+		t.Errorf("Check called Milo %d times, want 0", n)
+	}
+}
+
+// TestMiloCheckStart checks the background loop asks Milo at once and
+// stops with its context.
+func TestMiloCheckStart(t *testing.T) {
+	reader := &stubReader{}
+	c := newMiloCheck(reader, "default")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Start(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for reader.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reader.calls.Load() == 0 {
+		t.Fatal("Start didn't ask Milo")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Start returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start didn't stop with its context")
+	}
+	if c.NeedLeaderElection() {
+		t.Error("NeedLeaderElection = true, want every replica to check")
 	}
 }

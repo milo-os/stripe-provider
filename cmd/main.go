@@ -139,7 +139,12 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddHealthzCheck("milo", newMiloCheck(mgr.GetAPIReader(), providerConfigName).Check); err != nil {
+	milo := newMiloCheck(mgr.GetAPIReader(), providerConfigName)
+	if err := mgr.Add(milo); err != nil {
+		setupLog.Error(err, "unable to start Milo health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddHealthzCheck("milo", milo.Check); err != nil {
 		setupLog.Error(err, "unable to set up Milo health check")
 		os.Exit(1)
 	}

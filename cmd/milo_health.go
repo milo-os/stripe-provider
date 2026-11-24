@@ -23,7 +23,9 @@ const (
 	// holding its controller's worker for good.
 	reconcileTimeout = 5 * time.Minute
 
-	// miloCheckTimeout bounds each liveness check's request to Milo.
+	// miloCheckInterval is how often the Milo check asks Milo.
+	miloCheckInterval = 20 * time.Second
+	// miloCheckTimeout bounds each of its requests.
 	miloCheckTimeout = 10 * time.Second
 	// miloUnreachableAfter is how long Milo must go unanswered before
 	// liveness fails and the kubelet restarts the pod. Long enough that
@@ -34,9 +36,13 @@ const (
 // miloCheck is a liveness check on the connection the controllers use.
 // Leader election has a connection of its own, so a replica can keep its
 // lease while every request on the controllers' connection hangs: it stays
-// leader and does nothing. This check reads the provider config through
-// the controllers' client, uncached, and fails once nothing has come back
-// for miloUnreachableAfter.
+// leader and does nothing. The check reads the provider config through the
+// controllers' client, uncached, and fails once nothing has come back for
+// miloUnreachableAfter.
+//
+// The request runs in the background on miloCheckInterval, and the probe
+// only reports what it last saw: a probe that waited on a slow Milo would
+// outlast the kubelet's probe timeout and restart a healthy pod.
 type miloCheck struct {
 	reader client.Reader
 	name   string
@@ -54,9 +60,28 @@ func newMiloCheck(reader client.Reader, providerConfigName string) *miloCheck {
 	return c
 }
 
-// Check is a healthz.Checker.
-func (c *miloCheck) Check(req *http.Request) error {
-	ctx, cancel := context.WithTimeout(req.Context(), miloCheckTimeout)
+// Start asks Milo every miloCheckInterval until ctx ends. It's a
+// manager.Runnable.
+func (c *miloCheck) Start(ctx context.Context) error {
+	ticker := time.NewTicker(miloCheckInterval)
+	defer ticker.Stop()
+	for {
+		c.probe(ctx)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+// NeedLeaderElection is false: every replica checks its own connection,
+// since a standby takes over with the one it has.
+func (c *miloCheck) NeedLeaderElection() bool { return false }
+
+// probe asks Milo once and records whether it answered.
+func (c *miloCheck) probe(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, miloCheckTimeout)
 	defer cancel()
 	err := c.reader.Get(ctx, types.NamespacedName{Name: c.name}, &stripev1alpha1.StripeProviderConfig{})
 
@@ -65,13 +90,23 @@ func (c *miloCheck) Check(req *http.Request) error {
 	// Any answer from Milo, a refusal included, shows the connection works.
 	if err == nil || isAPIAnswer(err) {
 		c.lastOK, c.lastFail = c.now(), nil
-		return nil
+		return
 	}
 	c.lastFail = err
-	if since := c.now().Sub(c.lastOK); since > miloUnreachableAfter {
-		return fmt.Errorf("no answer from Milo for %s: %w", since.Round(time.Second), err)
+}
+
+// Check is a healthz.Checker. It doesn't call Milo, so it answers at once.
+func (c *miloCheck) Check(*http.Request) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	since := c.now().Sub(c.lastOK)
+	if since <= miloUnreachableAfter {
+		return nil
 	}
-	return nil
+	if c.lastFail != nil {
+		return fmt.Errorf("no answer from Milo for %s: %w", since.Round(time.Second), c.lastFail)
+	}
+	return fmt.Errorf("no answer from Milo for %s", since.Round(time.Second))
 }
 
 // isAPIAnswer reports whether err is a response from the API server rather
