@@ -196,6 +196,10 @@ func (c *Client) PreviewInvoice(ctx context.Context, d InvoiceDraft) (*InvoiceRe
 			Metadata: lineMetadata(l),
 		}
 		if code := l.taxOverride(); code != "" {
+			// Without price_data the item has no currency of its own, and a
+			// preview has no invoice for it to take one from, so Stripe
+			// refuses it. A draft's items take the draft's.
+			item.Currency = stripego.String(strings.ToLower(d.Currency))
 			item.UnitAmountDecimal = ptrDecimal(minorUnits(l.UnitAmount))
 			item.TaxBehavior = stripego.String("exclusive")
 			item.TaxCode = stripego.String(code)

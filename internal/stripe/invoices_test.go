@@ -186,6 +186,7 @@ func TestPreviewInvoice(t *testing.T) {
 		"invoice_items[0][metadata][datum_note]":            "Install delayed a week",
 		"invoice_items[0][metadata][datum_service_pricing]": "rack-v1",
 		"invoice_items[1][tax_code]":                        NontaxableTaxCode,
+		"invoice_items[1][currency]":                        "usd",
 		"invoice_items[1][unit_amount_decimal]":             "13500",
 		"invoice_items[1][tax_behavior]":                    "exclusive",
 		"invoice_items[1][metadata][datum_product]":         "datum_setup",
