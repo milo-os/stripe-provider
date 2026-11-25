@@ -43,6 +43,13 @@ type StripeCustomers struct {
 
 	mu    sync.Mutex
 	locks map[types.NamespacedName]*sync.Mutex
+
+	// numbers is held while a customer number is handed out, and
+	// counterChecked records that the counter has been raised to the
+	// highest number on any StripeCustomer since starting. See
+	// invoice_numbers.go.
+	numbers        sync.Mutex
+	counterChecked bool
 }
 
 // errNamespaceTerminating is returned by Ensure when the account has no

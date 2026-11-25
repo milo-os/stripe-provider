@@ -94,8 +94,9 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "name", "PaymentMethodWatcher")
 		os.Exit(1)
 	}
-	// One StripeCustomers for both reconcilers: it serializes creating an
-	// account's Stripe Customer between them.
+	// One StripeCustomers for every reconciler that writes StripeCustomer
+	// status: it serializes creating an account's Stripe Customer, and
+	// handing out its customer number, between them.
 	customers := controller.NewStripeCustomers(mgr.GetClient(), mgr.GetAPIReader())
 	if err = (&controller.StripePaymentMethodReconciler{ProviderConfigName: providerConfigName, Customers: customers}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "name", "StripePaymentMethod")
@@ -121,7 +122,7 @@ func main() {
 	}
 	// Invoice previews from Stripe, with tax: a preview, or a draft for
 	// staff to open in the dashboard.
-	if err = (&controller.StripeInvoiceReconciler{ProviderConfigName: providerConfigName}).SetupWithManager(mgr); err != nil {
+	if err = (&controller.StripeInvoiceReconciler{ProviderConfigName: providerConfigName, Customers: customers}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "name", "StripeInvoice")
 		os.Exit(1)
 	}

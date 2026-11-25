@@ -55,6 +55,7 @@ type stripeInvoicer interface {
 	RetrieveInvoice(ctx context.Context, id string) (*stripeinternal.InvoiceResult, error)
 	DeleteDraftInvoice(ctx context.Context, id string) error
 	DashboardInvoiceURL(id string) string
+	customerPrefixer
 }
 
 // StripeInvoiceReconciler has Stripe work out StripeInvoices: a preview,
@@ -68,6 +69,12 @@ type StripeInvoiceReconciler struct {
 	// credentials, as for the other reconcilers.
 	ProviderConfigName string
 
+	// Customers hands out customer numbers before an invoice is
+	// finalized. It's the StripeCustomers the other reconcilers share, so
+	// its writes to StripeCustomer status take the same per-account lock.
+	// Nil leaves invoice prefixes alone.
+	Customers *StripeCustomers
+
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 
@@ -80,6 +87,9 @@ type StripeInvoiceReconciler struct {
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeproviderconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeproviderconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeproducts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=servicepricings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch

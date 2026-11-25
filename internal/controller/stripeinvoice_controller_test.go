@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -38,6 +39,40 @@ type fakeInvoicer struct {
 	stored *stripeinternal.InvoiceResult
 	err    error
 	delErr error
+
+	// prefixes is each customer's invoice_prefix in Stripe; taken holds
+	// prefixes Stripe refuses; prefixSets records each prefix written, as
+	// "customer=prefix"; prefixErr fails reading a prefix.
+	prefixes   map[string]string
+	taken      map[string]bool
+	prefixSets []string
+	prefixErr  error
+}
+
+func (f *fakeInvoicer) CustomerInvoicePrefix(_ context.Context, customerID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.prefixErr != nil {
+		return "", f.prefixErr
+	}
+	if p, ok := f.prefixes[customerID]; ok {
+		return p, nil
+	}
+	return "RANDOM01", nil
+}
+
+func (f *fakeInvoicer) SetCustomerInvoicePrefix(_ context.Context, customerID, prefix string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.taken[prefix] {
+		return fmt.Errorf("%w: %s", stripeinternal.ErrInvoicePrefixTaken, prefix)
+	}
+	f.prefixSets = append(f.prefixSets, customerID+"="+prefix)
+	if f.prefixes == nil {
+		f.prefixes = map[string]string{}
+	}
+	f.prefixes[customerID] = prefix
+	return nil
 }
 
 func (f *fakeInvoicer) FinalizeInvoice(_ context.Context, id string) (*stripeinternal.InvoiceResult, error) {

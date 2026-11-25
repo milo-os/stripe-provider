@@ -21,6 +21,10 @@ spec:
     - jsonPath: .status.stripeCustomerId
       name: Customer
       type: string
+    - jsonPath: .status.customerNumber
+      name: Number
+      priority: 1
+      type: integer
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -142,6 +146,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              customerNumber:
+                description: |-
+                  CustomerNumber is the account's customer number, the first half of
+                  its invoice numbers. It's handed out just before the account's
+                  first invoice is finalized, when the StripeProviderConfig has
+                  spec.invoiceNumbers set.
+                format: int64
+                type: integer
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the
