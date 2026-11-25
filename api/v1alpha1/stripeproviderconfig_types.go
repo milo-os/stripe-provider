@@ -34,6 +34,27 @@ type StripeProviderConfigSpec struct {
 	//
 	// +kubebuilder:validation:Optional
 	APIVersion string `json:"apiVersion,omitempty"`
+
+	// InvoiceNumbers turns on numeric invoice numbers. When set, each
+	// billing account gets a customer number just before its first
+	// invoice is finalized, and the number becomes its Stripe customer's
+	// invoice_prefix, so invoices are numbered like 1042-0003. When
+	// unset, Stripe's random prefixes are left alone.
+	//
+	// +kubebuilder:validation:Optional
+	InvoiceNumbers *InvoiceNumbersConfig `json:"invoiceNumbers,omitempty"`
+}
+
+// InvoiceNumbersConfig sets how customer numbers are handed out.
+type InvoiceNumbersConfig struct {
+	// FirstCustomerNumber is the first customer number handed out. Later
+	// customers get the next number up. Stripe allows prefixes of up to
+	// 12 digits.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=999999999999
+	FirstCustomerNumber int64 `json:"firstCustomerNumber"`
 }
 
 // StripeProviderConfigStatus defines the observed state of a StripeProviderConfig.
@@ -61,6 +82,13 @@ type StripeProviderConfigStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	SupportedTaxIDTypes []SupportedTaxIDType `json:"supportedTaxIDTypes,omitempty"`
+
+	// LastCustomerNumber is the highest customer number handed out: the
+	// counter for spec.invoiceNumbers. It's written with an update, not
+	// a patch, so two writers can't hand out the same number.
+	//
+	// +kubebuilder:validation:Optional
+	LastCustomerNumber int64 `json:"lastCustomerNumber,omitempty"`
 
 	// ObservedGeneration is the most recent generation observed by the
 	// controller.

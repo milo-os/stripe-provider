@@ -68,6 +68,11 @@ func (r *StripeInvoiceReconciler) reconcileInvoice(ctx context.Context, inv *str
 			}
 		}
 		if inv.Spec.Finalize && apimeta.IsStatusConditionTrue(inv.Status.Conditions, stripev1alpha1.StripeInvoiceConditionSynced) {
+			if err := r.ensureInvoicePrefix(ctx, inv, stripe); err != nil {
+				return ctrl.Result{}, errors.Join(err, r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) {
+					setCondition(s, inv, stripev1alpha1.StripeInvoiceConditionFinalized, metav1.ConditionFalse, "NumberingFailed", stripeinternal.ErrorMessage(err))
+				}))
+			}
 			result, err := stripe.FinalizeInvoice(ctx, inv.Status.InvoiceID)
 			if err != nil {
 				return ctrl.Result{}, errors.Join(err, r.setStatus(ctx, inv, func(s *stripev1alpha1.StripeInvoiceStatus) {
@@ -82,6 +87,21 @@ func (r *StripeInvoiceReconciler) reconcileInvoice(ctx context.Context, inv *str
 	}
 
 	return r.refreshInvoice(ctx, inv, stripe)
+}
+
+// ensureInvoicePrefix has the account's Stripe customer number its invoices
+// with the account's customer number before one is finalized, when invoice
+// numbers are turned on. An invoice is never finalized on a random prefix
+// because this failed: the error stops the finalize.
+func (r *StripeInvoiceReconciler) ensureInvoicePrefix(ctx context.Context, inv *stripev1alpha1.StripeInvoice, stripe stripeInvoicer) error {
+	if r.Customers == nil {
+		return nil
+	}
+	key := types.NamespacedName{Namespace: inv.Namespace, Name: inv.Spec.BillingAccountRef.Name}
+	return r.Customers.EnsureInvoicePrefix(ctx, stripe, r.ProviderConfigName, key, func(n int64) {
+		r.event(inv, "Warning", "CustomerNumberRefused",
+			fmt.Sprintf("Stripe refused customer number %d as already taken; handing out the next one", n))
+	})
 }
 
 // syncInvoice writes the draft and its lines, and reads back Stripe's

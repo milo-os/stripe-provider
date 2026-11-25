@@ -10,6 +10,7 @@
 - [Controllers](#controllers)
   - [Product controller](#product-controller)
   - [Invoice controller](#invoice-controller)
+  - [Invoice numbers](#invoice-numbers)
   - [Preview controller](#preview-controller)
   - [Webhooks](#webhooks)
 - [The Invoice Lifecycle](#the-invoice-lifecycle)
@@ -280,7 +281,8 @@ Reconciles `StripeInvoice`s with `purpose: Invoice`. On each pass:
    first, even if the spec hasn't changed, so an item someone added to or
    removed from the draft in the Stripe dashboard is put right rather than
    billed; an item without a current `datum_line_key` is deleted. If
-   `Synced` is True after that, finalize
+   `Synced` is True after that, check the customer's invoice prefix (see
+   [Invoice numbers](#invoice-numbers)), finalize
    the invoice with `auto_advance: true`, then record `number`,
    `hostedInvoiceUrl` and `Finalized=True`. Stripe then charges the default
    payment method or sends the invoice, by its collection method.
@@ -293,6 +295,34 @@ Reconciles `StripeInvoice`s with `purpose: Invoice`. On each pass:
 A `StripeInvoice` deleted before finalization deletes its Stripe draft
 (finalizer). One deleted after finalization leaves the Stripe invoice alone:
 finalized invoices are voided by staff, never deleted.
+
+### Invoice numbers
+
+With `spec.invoiceNumbers.firstCustomerNumber` set on the
+`StripeProviderConfig`, invoice numbers are all digits, like `1042-0003`:
+the account's customer number, then Stripe's count of its invoices. Before
+each finalize, the invoice controller:
+
+1. Hands the account a customer number if its `StripeCustomer` has none.
+   The counter is `StripeProviderConfig.status.lastCustomerNumber`, moved
+   with an update that fails on a conflicting write before the number is
+   recorded on `StripeCustomer.status.customerNumber`. After a restart, the
+   counter is first raised to the highest number any `StripeCustomer`
+   holds.
+2. Reads the Stripe customer's `invoice_prefix` and sets it to the number
+   if it differs, then sets `InvoicePrefixSet=True` on the
+   `StripeCustomer`. This puts right a crash between recording a number
+   and setting it, and a prefix changed in the Stripe dashboard.
+3. If Stripe refuses the number as taken: while `InvoicePrefixSet` isn't
+   True, no invoice carries it, so the next number replaces it and a
+   `CustomerNumberRefused` event says so. Once it's True, the finalize
+   waits with `Finalized=False` (`NumberingFailed`) for staff to fix the
+   prefix in Stripe.
+
+Any failure here stops the finalize, so an invoice is never numbered with
+a random prefix because numbering failed. Without `invoiceNumbers`, Stripe's
+random prefixes are left alone. The design is billing's
+[invoice numbers enhancement](https://github.com/milo-os/billing/blob/main/docs/enhancements/invoice-numbers.md).
 
 ### Preview controller
 

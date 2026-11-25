@@ -62,6 +62,26 @@ spec:
                   Pod — typically sourced from a Kubernetes Secret synced out of
                   an external secret manager.
                 type: string
+              invoiceNumbers:
+                description: |-
+                  InvoiceNumbers turns on numeric invoice numbers. When set, each
+                  billing account gets a customer number just before its first
+                  invoice is finalized, and the number becomes its Stripe customer's
+                  invoice_prefix, so invoices are numbered like 1042-0003. When
+                  unset, Stripe's random prefixes are left alone.
+                properties:
+                  firstCustomerNumber:
+                    description: |-
+                      FirstCustomerNumber is the first customer number handed out. Later
+                      customers get the next number up. Stripe allows prefixes of up to
+                      12 digits.
+                    format: int64
+                    maximum: 999999999999
+                    minimum: 1
+                    type: integer
+                required:
+                - firstCustomerNumber
+                type: object
               publishableKey:
                 description: |-
                   PublishableKey is the Stripe publishable API key used by the portal
@@ -139,6 +159,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastCustomerNumber:
+                description: |-
+                  LastCustomerNumber is the highest customer number handed out: the
+                  counter for spec.invoiceNumbers. It's written with an update, not
+                  a patch, so two writers can't hand out the same number.
+                format: int64
+                type: integer
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the

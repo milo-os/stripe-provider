@@ -15,6 +15,11 @@ const (
 	// the billing account's tax IDs. A rejected tax ID does not stop the
 	// customer from being Ready.
 	StripeCustomerConditionTaxIDsApplied = "TaxIDsApplied"
+
+	// StripeCustomerConditionInvoicePrefixSet is True once the Stripe
+	// customer's invoice_prefix has been set to status.customerNumber, so
+	// invoices may carry the number. Once True it stays True.
+	StripeCustomerConditionInvoicePrefixSet = "InvoicePrefixSet"
 )
 
 // StripeCustomerSpec defines the desired state of a StripeCustomer.
@@ -47,6 +52,14 @@ type StripeCustomerStatus struct {
 	// +kubebuilder:validation:Optional
 	StripeCustomerID string `json:"stripeCustomerId,omitempty"`
 
+	// CustomerNumber is the account's customer number, the first half of
+	// its invoice numbers. It's handed out just before the account's
+	// first invoice is finalized, when the StripeProviderConfig has
+	// spec.invoiceNumbers set.
+	//
+	// +kubebuilder:validation:Optional
+	CustomerNumber int64 `json:"customerNumber,omitempty"`
+
 	// Conditions represent the latest available observations.
 	//
 	// +kubebuilder:validation:Optional
@@ -75,6 +88,7 @@ type StripeCustomerStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="BillingAccount",type=string,JSONPath=`.spec.billingAccountRef.name`
 // +kubebuilder:printcolumn:name="Customer",type=string,JSONPath=`.status.stripeCustomerId`
+// +kubebuilder:printcolumn:name="Number",type=integer,JSONPath=`.status.customerNumber`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type StripeCustomer struct {
