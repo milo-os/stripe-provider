@@ -11,9 +11,9 @@ require (
 	github.com/shopspring/decimal v1.4.0
 	github.com/stripe/stripe-go/v87 v87.1.0
 	go.miloapis.com/billing v0.12.1-0.20261123152233-95b07c49771b
-	k8s.io/api v0.37.2
-	k8s.io/apimachinery v0.37.2
-	k8s.io/client-go v0.37.2
+	k8s.io/api v0.37.3
+	k8s.io/apimachinery v0.37.3
+	k8s.io/client-go v0.37.3
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	sigs.k8s.io/controller-runtime v0.25.3
 )
